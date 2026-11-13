@@ -10,11 +10,19 @@ North star: **maximum speed, zero bloat («очень быстрый брауз�
 Cargo is installed at `/home/mrevds/.cargo/bin/cargo` (build artifacts go to `/tmp/droplet-target` via `.cargo/config.toml`).
 
 ```bash
-# Run full unit & integration test suite
-/home/mrevds/.cargo/bin/cargo test
+# Run full unit & integration test suite (includes corpus layout goldens)
+/home/mrevds/.cargo/bin/cargo test --workspace
 
-# Lint with Clippy (zero warnings expected)
-/home/mrevds/.cargo/bin/cargo clippy --all-targets
+# Lint with Clippy (zero warnings expected), also with the experimental sandbox feature
+/home/mrevds/.cargo/bin/cargo clippy --workspace --all-targets
+/home/mrevds/.cargo/bin/cargo clippy -p droplet-desktop --features sandbox --all-targets
+
+# Corpus goldens only / re-bless after reviewing screenshots
+/home/mrevds/.cargo/bin/cargo test -p droplet-desktop --test corpus
+DROPLET_BLESS=1 /home/mrevds/.cargo/bin/cargo test -p droplet-desktop --test corpus
+
+# Per-stage benchmark (median ms per stage + peak RSS); real sites via tools/bench-sites.sh
+/home/mrevds/.cargo/bin/cargo run --release -- --bench --runs 20 about:droplet
 
 # Build release binary
 /home/mrevds/.cargo/bin/cargo build --release
@@ -26,6 +34,9 @@ Cargo is installed at `/home/mrevds/.cargo/bin/cargo` (build artifacts go to `/t
 /home/mrevds/.cargo/bin/cargo run -- --dump-dom about:test
 /home/mrevds/.cargo/bin/cargo run -- --dump-layout about:test
 /home/mrevds/.cargo/bin/cargo run -- --screenshot /tmp/out.ppm about:droplet
+
+# Experimental, off by default: ES-subset JS VM (`--js`), sandboxed renderer (`--features sandbox`)
+/home/mrevds/.cargo/bin/cargo run -- --js about:test
 ```
 
 ---
@@ -57,19 +68,26 @@ Cargo is installed at `/home/mrevds/.cargo/bin/cargo` (build artifacts go to `/t
 
 ## Mandatory Agent Workflow
 
+**Depth before breadth.** The project was re-baselined in Nov 2026 because earlier agents marked
+tickets `done` when tests passed while real pages rendered wrong. "Done" now means *seen on a
+screenshot and measured*.
+
 Before editing any code on a new task:
 
-1. **Read the project roadmap & map:**
-   - [ARCHITECTURE.md](ARCHITECTURE.md) — pipeline, modules, exact data structures, and Low-RAM invariants.
-   - [ROADMAP.md](ROADMAP.md) — phased plan (Phases 1–9), cross-platform strategy, and performance targets.
-   - [.scratch/SPEC.md](.scratch/SPEC.md) — ticket frontier table (`DROP-001` .. `DROP-011`).
-2. **Select the next frontier ticket:**
-   - Pick a ticket marked `ready-for-agent` whose `Blocked By` tickets are all `done` (currently `DROP-005`, `DROP-006`, `DROP-007`, `DROP-011`).
-   - Read its full specification in `.scratch/issues/DROP-*.md` (or draft one if marked `TBD`).
-3. **Implement & Verify:**
-   - Keep changes strictly scoped to the ticket. Match existing module boundaries and code style.
-   - Run `/home/mrevds/.cargo/bin/cargo test` and `/home/mrevds/.cargo/bin/cargo clippy --all-targets`.
-   - For visual/layout changes, render `about:test` and `about:droplet` with `--screenshot /tmp/out.ppm` and inspect `--dump-layout`.
-4. **Update Tracking Docs Before Finishing:**
-   - Mark the ticket `done` in [.scratch/SPEC.md](.scratch/SPEC.md) and update any unblocked downstream ticket statuses (`blocked` -> `ready-for-agent` if all its blockers are now `done`).
-   - Update [ROADMAP.md](ROADMAP.md) (and [ARCHITECTURE.md](ARCHITECTURE.md) / [README.md](README.md) if public structs, pipeline stages, shortcuts, or CLI flags changed).
+1. **Read:** [ROADMAP.md](ROADMAP.md) (phases + rules), [.scratch/SPEC.md](.scratch/SPEC.md) (ticket
+   table + done gate), [ARCHITECTURE.md](ARCHITECTURE.md) (pipeline, Low-RAM invariants),
+   [tests/corpus/README.md](tests/corpus/README.md) (golden workflow).
+2. **Pick a ticket:** the lowest-numbered `ready` ticket in the earliest unfinished phase. Never work
+   on `frozen` code (`droplet-js`, `droplet-sandbox`, `droplet-ipc`, `linux_wayland.rs`, `macos.rs`)
+   beyond build fixes. Write your name/model into the ticket's `Owner` line.
+3. **Measure first:** run `--bench` on the ticket's pages and keep the numbers.
+4. **Implement & verify** on a branch, scoped to the ticket:
+   - tests first in the affected module (`#[cfg(test)] mod tests`), Cyrillic/UTF-8 included;
+   - `cargo test --workspace`, both clippy commands above;
+   - screenshot the ticket's corpus pages, compare with the page's `EXPECT:` comment, flip
+     `tests/corpus/manifest.txt` to `ok` only if it is right, re-bless goldens and read the diff;
+   - `--bench` after: not worse; paste before/after numbers in the commit message.
+5. **Update tracking docs:** ticket status in `.scratch/SPEC.md` (+ unblock downstream), the metrics
+   table in `ROADMAP.md` if a number moved, `ARCHITECTURE.md` / `README.md` if public structs,
+   pipeline stages, CLI flags or shortcuts changed.
+6. **Commit** per ticket. Never leave work uncommitted, never run several agents in one dirty checkout.

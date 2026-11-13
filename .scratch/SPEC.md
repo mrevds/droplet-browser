@@ -1,55 +1,80 @@
 # Droplet Execution Frontier (`SPEC.md`)
 
-This file is the source of truth for autonomous agents picking up work on **Droplet**.  
-Before starting a ticket:
-1. Read [CLAUDE.md](../CLAUDE.md), [ARCHITECTURE.md](../ARCHITECTURE.md), and [ROADMAP.md](../ROADMAP.md).
-2. Choose a ticket in `ready-for-agent` status whose `Blocked By` dependencies are all `done`.
-3. Open its spec in `.scratch/issues/` (if present) and verify all acceptance tests after implementation.
+Source of truth for picking work. Phases and rules: [ROADMAP.md](../ROADMAP.md).
+Old tickets `DROP-001..011` are archived in [archive/](archive/) — their `done` status meant
+"tests + clippy green", not "renders correctly", so they are history only.
 
----
+## How to take a ticket
 
-## Frontier Table (`DROP-001` .. `DROP-011`)
+1. Read [CLAUDE.md](../CLAUDE.md), [ROADMAP.md](../ROADMAP.md) (rules section), [ARCHITECTURE.md](../ARCHITECTURE.md).
+2. Pick the **lowest-numbered** `ready` ticket in the **earliest unfinished phase**. Do not start a
+   later phase while an earlier one has `ready` tickets. Spec lives in `issues/DROP-*.md`;
+   if the spec column says `draft`, write the spec first and get it reviewed.
+3. Work on a branch, one ticket per branch. Record bench numbers **before** you change code:
+   `cargo run --release -- --bench <page>` for the pages listed in the ticket.
+4. Done gate (all required):
+   - acceptance tests in the ticket pass; `cargo test --workspace`; `cargo clippy --workspace --all-targets`;
+   - corpus pages in the ticket's scope reviewed from a screenshot and flipped to `ok` in
+     `tests/corpus/manifest.txt`; goldens re-blessed (`DROPLET_BLESS=1 cargo test -p droplet-desktop --test corpus`)
+     and the diff read;
+   - bench numbers after the change are not worse (paste before/after in the commit message);
+   - status flipped here, downstream `blocked` → `ready` when all blockers are `done`.
 
-| ID | Phase | Title | Status | Blocked By | Owner / Model | Spec | Verification Command |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `DROP-001` | Phase 1 | Core Pipeline (URL, HTTP/1.1, HTML/DOM, CSS/Style, Layout, 8x16 Font, Rasterizer, X11/PPM) | `done` | — |  DeepSeek V4.1 Flash Free (OpenCode agent)  | Core v0.1 baseline | `/home/mrevds/.cargo/bin/cargo test && /home/mrevds/.cargo/bin/cargo run -- --screenshot /tmp/droplet-p1.ppm about:test` |
-| `DROP-002` | Phase 2 | Full Inline-Block & Flexbox Layout, Relative Units (`%`/`em`/`rem`/`vh`/`vw`), `:hover`/`:active` | `done` | `DROP-001` |  DeepSeek V4.1 Flash Free (OpenCode agent)  | [DROP-002](issues/DROP-002-inline-and-flexbox.md) | `/home/mrevds/.cargo/bin/cargo test && /home/mrevds/.cargo/bin/cargo run -- --dump-layout about:test` |
-| `DROP-003` | Phase 3 | HTTPS (Linux OpenSSL TLS), Keep-Alive Pool, Concurrent External CSS Fetch, DNS Cache & Tracker Filter | `done` | `DROP-001` |  DeepSeek V4.1 Flash Free (OpenCode agent)  | [DROP-003](issues/DROP-003-https-and-external-css.md) | `/home/mrevds/.cargo/bin/cargo test && /home/mrevds/.cargo/bin/cargo clippy --all-targets` |
-| `DROP-004` | Phase 4 | System TTF Discovery (`sfnt`/`glyf` AA + Atlas), PNG/BMP/PPM/SVG Decoding, `<img>` Boxes, Multi-Tab & Win32 Shell | `done` | `DROP-001` |  DeepSeek V4.1 Flash Free (OpenCode agent)  | [DROP-004](issues/DROP-004-truetype-fonts-and-images.md) | `/home/mrevds/.cargo/bin/cargo test && /home/mrevds/.cargo/bin/cargo run -- --screenshot /tmp/droplet-p4.ppm about:droplet` |
-| `DROP-005` | Phase 5 | HTML Forms (`<input>`, `<textarea>`, `<button>`, `<select>`), Focus Ring, Text Selection & X11/Win32 Clipboard | `done` | `DROP-002` |  Swarm Wave 1 (`forms`)  | [DROP-005](issues/DROP-005-forms-and-selection.md) | `/home/mrevds/.cargo/bin/cargo test && /home/mrevds/.cargo/bin/cargo clippy --all-targets` |
-| `DROP-006` | Phase 6 | Persistent Bookmarks/History Store, Find-in-Page (`Ctrl+F`), Keyboard-First Command UI & Box Model DevTools | `done` | `DROP-002`, `DROP-004` |  Swarm Wave 1 (`tools`)  | [DROP-006](issues/DROP-006-shell-tools.md) | `/home/mrevds/.cargo/bin/cargo test && /home/mrevds/.cargo/bin/cargo clippy --all-targets` |
-| `DROP-007` | Phase 7 | Minimalist ES Subset Parser & Register/Stack Bytecode VM | `done` | `DROP-002`, `DROP-003` |  Swarm Wave 1 (`js-vm`)  | [DROP-007](issues/DROP-007-js-vm.md) | `/home/mrevds/.cargo/bin/cargo test && /home/mrevds/.cargo/bin/cargo clippy --all-targets` |
-| `DROP-008` | Phase 7 | Reactive DOM Bindings, Event Dispatch & Incremental Dirty Relayout/Repaint | `done` | `DROP-005`, `DROP-007` |  Swarm Wave 2 (`js-vm`, `forms`)  | [DROP-008](issues/DROP-008-reactive-dom.md) | `/home/mrevds/.cargo/bin/cargo test --workspace && /home/mrevds/.cargo/bin/cargo clippy --workspace --all-targets` |
-| `DROP-009` | Phase 8 | Hardware GPU Rendering / Zero-Copy Blitting (X11 `MIT-SHM`, Win32 `DIBSection` & Damage Tracking) | `done` | `DROP-006` |  Swarm Wave 2 (`tools`, `wayland`, `winmac-jpeg`)  | [DROP-009](issues/DROP-009-gpu-zerocopy.md) | `/home/mrevds/.cargo/bin/cargo test --workspace && /home/mrevds/.cargo/bin/cargo clippy --workspace --all-targets` |
-| `DROP-010` | Phase 8 | Multi-Process Renderer Isolation (Linux `seccomp-bpf` + Namespaces + `memfd` IPC / Windows Job & AppContainer) | `done` | `DROP-008`, `DROP-009` |  Swarm Wave 3 (`wayland`, `js-vm`, `forms`, `tools`, `winmac-jpeg`)  | [DROP-010](issues/DROP-010-multiprocess-sandbox.md) | `/home/mrevds/.cargo/bin/cargo test --workspace && /home/mrevds/.cargo/bin/cargo clippy --workspace --all-targets` |
-| `DROP-011` | Phase 9 | Native Wayland Client, Windows Schannel TLS, Pure-Rust Baseline JPEG Decoder & macOS Cocoa (when on macOS) | `done` | `DROP-003`, `DROP-004` |  Swarm Wave 1 (`wayland`, `winmac-jpeg`)  | [Wayland](issues/DROP-011-wayland.md), [Win/macOS/JPEG](issues/DROP-011-windows-macos-jpeg.md) | `/home/mrevds/.cargo/bin/cargo test && /home/mrevds/.cargo/bin/cargo clippy --all-targets` |
+Status values: `done`, `ready`, `blocked`, `frozen` (do not touch until its phase).
 
----
+## Frontier
 
-## Model / Agent Attribution (multi-agent project)
+| ID | Phase | Title | Status | Blocked by | Corpus / pages | Spec |
+| --- | --- | --- | --- | --- | --- | --- |
+| `DROP-100` | P0 | Hygiene & measurement: remove `src/`, JS off by default, `sandbox` feature, unified `--dump-layout`, `--bench`, corpus goldens | `done` | — | all (baseline) | this file |
+| `DROP-110` | P1 | Navigation off the UI thread: worker + channel, cancel, progressive status | `ready` | — | HN, Wikipedia (GUI responsiveness) | [spec](issues/DROP-110-async-navigation.md) |
+| `DROP-111` | P1 | Reliable TLS handshake & timeouts (poll-based, separate connect/handshake/read deadlines) | `ready` | — | HN | [spec](issues/DROP-111-tls-timeouts.md) |
+| `DROP-112` | P1 | `Content-Encoding: gzip/deflate` (reuse PNG inflate) | `ready` | — | Wikipedia | [spec](issues/DROP-112-gzip.md) |
+| `DROP-113` | P1 | Cookies (RFC 6265 subset, bounded jar, `Secure`/`HttpOnly`/`Path`/`Expires`) | `ready` | — | login flows | [spec](issues/DROP-113-cookies.md) |
+| `DROP-120` | P2 | Selector rule index (buckets by id/class/tag, right-to-left match) | `ready` | — | Wikipedia style `261 ms → < 20 ms` | [spec](issues/DROP-120-rule-index.md) |
+| `DROP-121` | P2 | Cascade: `!important`, `inherit`/`initial`/`unset`, custom properties + `var()` | `ready` | — | `08-cascade` | [spec](issues/DROP-121-cascade.md) |
+| `DROP-122` | P2 | `@media` (width/height/orientation/`prefers-color-scheme`/print), `@import`, `@supports` basic | `ready` | — | `07-media`, Wikipedia | [spec](issues/DROP-122-at-rules.md) |
+| `DROP-123` | P2 | Selectors: `:not`, `:nth-child/-of-type`, `:first/last-child`, attribute operators, `+` `~` | `ready` | — | `12-selectors` | [spec](issues/DROP-123-selectors.md) |
+| `DROP-124` | P2 | `box-sizing`, `min/max-width/height`, shorthand audit (margin/padding/border/background/font) | `ready` | — | `09-box-sizing`, rust-lang.org | [spec](issues/DROP-124-box-model.md) |
+| `DROP-130` | P3 | Positioned layout: relative/absolute/fixed/sticky + `z-index` stacking | `blocked` | `DROP-124` | `05-position` | draft |
+| `DROP-131` | P3 | Floats & `clear` | `blocked` | `DROP-124` | `06-float` | draft |
+| `DROP-132` | P3 | Table layout (auto widths, `colspan`/`rowspan`, `border-collapse`) | `blocked` | `DROP-124` | `04-table`, HN | draft |
+| `DROP-133` | P3 | `overflow` clip/scroll containers, `visibility` | `blocked` | `DROP-130` | `11-overflow` | draft |
+| `DROP-134` | P3 | Margin collapsing, line breaking (UAX #14 subset), `white-space` | `blocked` | `DROP-124` | `01`, Wikipedia | draft |
+| `DROP-140` | P4 | Italic/oblique + font fallback chains, kerning | `blocked` | Phase 3 | `02-inline` | draft |
+| `DROP-141` | P4 | WebP decoder (lossless + lossy) | `blocked` | Phase 3 | real sites | draft |
+| `DROP-142` | P4 | Image memory budget, lazy decode outside viewport | `blocked` | Phase 3 | Wikipedia RSS `< 40 MB` | draft |
+| `DROP-150` | P5 | Scroll without relayout (shift cached frame, repaint exposed strip) | `blocked` | Phase 4 | — | draft |
+| `DROP-151` | P5 | Incremental restyle/relayout of dirty subtrees | `blocked` | Phase 4 | — | draft |
+| `DROP-152` | P5 | Enforced perf budgets: bench regression test over corpus | `blocked` | Phase 4 | all | draft |
+| `DROP-153` | P5 | Idle CPU + multi-tab RAM measurement; verify hibernation frees memory | `blocked` | Phase 4 | — | draft |
+| `DROP-160` | P6 | Forms complete (encodings, checkbox/radio, `select multiple`) | `blocked` | Phase 5 | — | draft |
+| `DROP-161` | P6 | Downloads | `blocked` | Phase 5 | — | draft |
+| `DROP-162` | P6 | Session restore | `blocked` | Phase 5 | — | draft |
+| `DROP-170` | P7 | ADR: JavaScript strategy (no-JS by design vs real engine) | `frozen` | Phase 6 | — | draft |
+| `DROP-180` | P8 | Sandbox wired into the GUI process | `frozen` | Phase 6 | — | draft |
+| `DROP-181` | P8 | Parser fuzzing harness (HTML/CSS/PNG/JPEG/TLS records), no deps | `frozen` | Phase 6 | — | draft |
+| `DROP-182` | P8 | `unsafe` audit (~400 sites) | `frozen` | Phase 6 | — | draft |
+| `DROP-190` | P9 | Windows parity on corpus | `frozen` | Phase 6 | all | draft |
+| `DROP-191` | P9 | Wayland parity with X11 | `frozen` | Phase 6 | all | draft |
+| `DROP-192` | P9 | macOS (needs a macOS host) | `frozen` | Phase 6 | all | draft |
 
-The `Owner / Model` column above records which AI model/agent implemented each phase, because Droplet phases are executed by several agents in parallel:
+Phase 1 and Phase 2 tickets are independent of each other and may run in parallel —
+**each on its own branch/worktree**, never in one shared dirty checkout.
 
-- **DeepSeek V4.1 Flash Free (OpenCode agent)** — implemented the completed baseline: `DROP-001` … `DROP-004` (core pipeline, flexbox/inline-block, HTTPS/OpenSSL + tracker filter, TTF fonts + image decoders + multi-tab shell).
-- **Cline (AI coding agent)** — currently executing the open frontier: `DROP-005`, `DROP-006`, `DROP-007`, `DROP-011`. Each agent keeps its changes strictly scoped to its ticket(s) and respects module boundaries so parallel work does not collide.
-- **Unassigned** (`—`) — tickets whose blockers are not yet done (`DROP-008`, `DROP-009`, `DROP-010`); they become claimable once all `Blocked By` tickets reach `done`.
+## Frozen code
 
-Before starting a ticket, an agent updates its issue file's `Implementation owner` line to its own name/model. After finishing, it marks the ticket `done` in this table and flips any downstream `blocked` ticket to `ready-for-agent` when all its blockers are `done`.
+No feature work until its phase: `crates/droplet-js` (P7), `crates/droplet-sandbox` and
+`crates/droplet-ipc` (P8), `crates/droplet-platform/src/linux_wayland.rs` and `macos.rs` (P9).
+Build fixes are allowed.
 
-## Dependency Notes
-
-- **Completed baseline (`DROP-001` .. `DROP-004`):** Core pipeline, Flexbox/InlineBlock/`vh`/`vw`/`:hover`/`:active`, Linux OpenSSL HTTPS + Keep-Alive + `TrackerFilter`, pure-Rust `sfnt`/`glyf` AA font engine + `GlyphAtlas`, PNG/BMP/PPM/SVG decoder + `<img>` boxes, multi-tab `TabState` + Tab Hibernation (`MAX_WARM_TABS = 3`), and `src/platform/` (`linux_x11.rs` + `windows.rs` + `macos.rs` stub) are implemented.
-- **Current open frontier (`ready-for-agent`):** `DROP-005`, `DROP-006`, `DROP-007`, and `DROP-011` all have their blockers satisfied and may be executed in parallel (watching module boundaries).
-- **Updated blocker notes:** `DROP-009` remains blocked only by `DROP-006` (`DROP-004` is `done`); `DROP-010` remains blocked only by `DROP-008`, `DROP-009` (`DROP-003` is `done`).
-
----
-
-## Global Verification Gate (Every Ticket)
+## Global verification gate
 
 ```bash
-/home/mrevds/.cargo/bin/cargo test
-/home/mrevds/.cargo/bin/cargo clippy --all-targets
-/home/mrevds/.cargo/bin/cargo run -- --dump-dom about:test
-/home/mrevds/.cargo/bin/cargo run -- --dump-layout about:test
-/home/mrevds/.cargo/bin/cargo run -- --screenshot /tmp/droplet-verify.ppm about:droplet
+/home/mrevds/.cargo/bin/cargo test --workspace
+/home/mrevds/.cargo/bin/cargo clippy --workspace --all-targets
+/home/mrevds/.cargo/bin/cargo clippy -p droplet-desktop --features sandbox --all-targets
+/home/mrevds/.cargo/bin/cargo test -p droplet-desktop --test corpus
+/home/mrevds/.cargo/bin/cargo run --release -- --bench about:droplet
+tools/bench-sites.sh   # network; real-site smoke + numbers
 ```

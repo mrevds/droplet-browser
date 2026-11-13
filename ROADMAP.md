@@ -1,126 +1,132 @@
-# Droplet Roadmap — Дорожная карта разработки
+# Droplet Roadmap — Дорожная карта
 
-**Главная цель (North Star):** сверхбыстрый, лёгкий графический браузер на Rust без мусора («очень быстрый браузер без мусора»).  
-Каждая фаза спроектирована так, чтобы сохранять минимальный размер бинарника, низкое потребление памяти и субмиллисекундный рендеринг, позволяя следующим AI-моделям автономно брать тикеты из [.scratch/SPEC.md](.scratch/SPEC.md).
+**North Star:** очень быстрый, лёгкий браузер на Rust без мусора. Летает, не ест память,
+и **правильно показывает реальные сайты**. Последний пункт раньше не проверялся — поэтому
+роадмап пересобран (re-baseline, ноябрь 2026).
+
+Тикеты и статусы: [.scratch/SPEC.md](.scratch/SPEC.md). Старые тикеты `DROP-001..011`
+лежат в [.scratch/archive/](.scratch/archive/) только для истории.
 
 ---
 
-## Целевые метрики производительности (Performance Targets)
+## Честное состояние на старте (Phase 0, замеры от 2026-11-13)
 
-| Метрика | Целевое значение | Примечание |
+Что хорошо: сборка без внешних крейтов, 2.3 МБ release-бинарник, `about:droplet` проходит
+весь CPU-конвейер за ~1.5 мс при RSS ~14 МБ. Arena DOM, `Copy` `ComputedStyle`, плоский
+`DisplayList` — правильный фундамент, его сохраняем.
+
+Что плохо — раньше «done» значило «тесты и clippy зелёные», а не «страница выглядит правильно»:
+
+| Проблема | Факт |
+| --- | --- |
+| Ядро вёрстки не готово | корпус `tests/corpus`: **4 из 12** страниц `ok`; нет таблиц, `position`, `float`, `@media`, `!important`, `var()`, `box-sizing`, `overflow`, большинства селекторов |
+| Сеть блокирует окно | навигация синхронная в UI-потоке → окно висит 2–8 с на загрузке |
+| TLS ненадёжен | `https://news.ycombinator.com` периодически падает с `TLS handshake timed out` |
+| Нет gzip и cookies | Wikipedia качается несжатой (1 МБ HTML); логин нигде не работает |
+| Style не масштабируется | Wikipedia: **style 261 мс** из 295 мс CPU (19 тыс. узлов × все правила) |
+| Широта вместо глубины | JS VM (7.7k строк) не парсит `new`/шаблонные строки — ошибка на каждом сайте; песочница работала только из CLI-флага |
+
+Решения Phase 0: JS выключен по умолчанию (`--js` включает), песочница — за cargo feature
+`sandbox`, мёртвый монолит `src/` удалён, появились корпус с golden-тестами и `droplet --bench`.
+
+---
+
+## Правила (для людей и AI-агентов)
+
+1. **Глубина раньше ширины.** Нельзя начинать фазу N+1, пока страницы корпуса фазы N не `ok`.
+   Заморожены до своих фаз: `droplet-js` (P7), `droplet-sandbox` + `droplet-ipc` (P8),
+   `linux_wayland.rs` и `macos.rs` (P9). В замороженном коде — только исправления сборки.
+2. **«Done» = видно глазами + измерено.** Тикет закрыт, когда:
+   - страницы корпуса из его зоны переведены в `ok` в `tests/corpus/manifest.txt` после просмотра скриншота;
+   - goldens перезаписаны (`DROPLET_BLESS=1`) и diff просмотрен;
+   - `droplet --bench` на затронутых страницах не стал хуже (цифры до/после в описании коммита);
+   - `cargo test --workspace` и `cargo clippy --workspace --all-targets` зелёные.
+3. **Один тикет — один коммит** (или серия коммитов в одной ветке). Никаких параллельных
+   агентов в одной незакоммиченной рабочей копии.
+4. **Ноль внешних зависимостей**, итеративные обходы DOM, `ComputedStyle: Copy`, жёсткие лимиты
+   кэшей — как в [ARCHITECTURE.md](ARCHITECTURE.md).
+5. **UTF-8 / кириллица** — в каждом тесте парсеров и рендеринга.
+
+---
+
+## Целевые метрики (проверяются `droplet --bench` / `tools/bench-sites.sh`)
+
+| Метрика | Цель | Сейчас |
 | --- | --- | --- |
-| **Cold Start** | `< 20 ms` | От запуска процесса до первого кадра на `about:droplet` |
-| **Idle RAM (RSS)** | `< 15 MB` | На статической странице с одним окном (и десятки MB даже при многих вкладках за счёт Tab Hibernation) |
-| **Layout + Paint** | `< 2 ms` | Полный цикл `Style -> Layout -> DisplayList -> Rasterize` для типовой страницы |
-| **Idle CPU** | `~ 0%` | Никакого polling-рендеринга, перерисовка только по `dirty`-флагам |
-| **Compile Time** | `< 2 s` (incremental) | Ноль внешних крейтов в `Cargo.toml`, строгая модульность без proc-macro |
+| CPU конвейер, `about:droplet` | `< 2 ms` | ~1.5 ms ✅ |
+| CPU конвейер, Wikipedia-статья | `< 40 ms` | ~295 ms ❌ (style) |
+| Peak RSS, одна простая вкладка | `< 15 MB` | ~14 MB ✅ |
+| Peak RSS, Wikipedia-статья | `< 40 MB` | ~58 MB ❌ |
+| UI во время загрузки | не блокируется | блокируется ❌ |
+| Холостой CPU | ~0% | не измерялось |
+| Корпус `tests/corpus` | 100% `ok` | 4/12 |
 
 ---
 
-## Правила защиты от раздувания кода (Anti-Bloat Guidelines для AI-агентов)
+## Фазы
 
-1. **Не тащить тяжёлые зависимости.** Не подключать `tokio`, `hyper`, `reqwest`, `winit`, `egui`, `chromium`-обёртки или огромные графы крейтов. Во всех крейтах workspace **ноль внешних зависимостей** (только локальные `droplet-*`).
-2. **Данные важнее иерархий.** Использовать плоские массивы (`Vec<Node>`, `DisplayList`), `Vec<(String, String)>` для DOM-атрибутов, целочисленные индексы (`NodeId(usize)`) и `Copy`-структуры (`ComputedStyle`) без `HashMap` и без `Rc<RefCell<...>>`.
-3. **Разделять этапы конвейера.** Сетевой слой не знает про layout, layout не рисует пиксели, rasterizer не знает про X11/Win32, а весь платформенный FFI изолирован в `crates/droplet-platform/src/` и `#[cfg(target_os = ...)]`.
-4. **Бенчмарк перед усложнением.** Любой кэш должен быть жёстко ограничен по памяти (`MAX_ATLAS_ENTRIES = 4096`, `MAX_WARM_TABS = 3`, `DNS_CACHE_MAX_ENTRIES = 256`, `POOL_MAX_TOTAL = 32`).
-5. **Обязательное покрытие тестами.** Перед переводом тикета в `done` должны проходить `cargo test`, `cargo clippy --all-targets` и визуальный прогон на `about:test` / `about:droplet`.
+### Phase 0 — Гигиена и измерения `[DONE]` (`DROP-100`)
+Снимок кода закоммичен; удалён мёртвый `src/` (21.6k строк); JS по умолчанию выключен;
+песочница за feature `sandbox`; `--dump-layout` и `--screenshot` идут через один конвейер
+`Browser`; `droplet --bench` (медиана по стадиям + peak RSS); корпус `tests/corpus` с goldens
+(`DROPLET_FONTS=builtin` для детерминизма) и ручным манифестом `ok/wrong`; `tools/bench-sites.sh`.
 
----
+### Phase 1 — Сеть, которая не тормозит окно
+Загрузка в фоновом потоке, отмена навигации, прогрессивный показ; надёжный TLS; gzip; cookies.
+**Выход:** окно отзывчиво во время загрузки любого сайта; HN/Wikipedia открываются стабильно;
+Wikipedia приходит сжатой; cookie-сессия сохраняется между переходами.
+Тикеты: `DROP-110` … `DROP-113`.
 
-## Стратегия кроссплатформенного оконного слоя (Cross-Platform Windowing Strategy)
+### Phase 2 — Правильный CSS
+Индекс правил (скорость style), полный каскад (`!important`, `inherit/initial/unset`, `var()`),
+`@media`/`@import`, селекторы (`:not`, `:nth-*`, атрибуты, комбинаторы), `box-sizing`,
+`min/max-*`, шортхенды.
+**Выход:** корпус `07`, `08`, `09`, `12` → `ok`; style на Wikipedia `< 20 ms`.
+Тикеты: `DROP-120` … `DROP-124`.
 
-Весь платформенный GUI-слой вынесен в `crates/droplet-platform/src/` (`mod.rs` с `#[cfg(target_os = ...)]`, а `crates/droplet-platform/src/lib.rs` сохранён как compatibility alias):
+### Phase 3 — Ядро вёрстки
+`position` (relative/absolute/fixed/sticky) + `z-index`, `float`/`clear`, таблицы,
+`overflow`/`visibility` и скролл-контейнеры, схлопывание margin, перенос строк (UAX #14
+подмножество), `white-space`.
+**Выход:** корпус `04`, `05`, `06`, `11` → `ok`; HN и Wikipedia визуально узнаваемы.
+Тикеты: `DROP-130` … `DROP-134`.
 
-- **Ubuntu Linux:** X11 (`crates/droplet-platform/src/linux_x11.rs`, **готово** — динамический `dlopen("libX11.so.6")` + `XCreateImage`/`XPutImage`) -> далее нативный клиент Wayland + `MIT-SHM` zero-copy blitting (`DROP-011` / `DROP-009`).
-- **Windows:** Win32 API (`crates/droplet-platform/src/windows.rs` + `StretchDIBits`, **готово в базовом виде**) -> далее Windows Schannel TLS (`DROP-011`) + Direct2D/D3D11 ускорение (`DROP-009`).
-- **macOS:** архитектурный слот (`crates/droplet-platform/src/macos.rs`), но сборка и живое тестирование Cocoa/Metal требуют macOS/Apple SDK (на Ubuntu сейчас не собирается нативно; доработка вынесена в `DROP-011` при наличии macOS-хоста).
+### Phase 4 — Текст и картинки
+Курсив/oblique и цепочки fallback-шрифтов, кернинг; WebP; бюджет памяти на картинки и
+ленивое декодирование вне вьюпорта.
+**Выход:** корпус `02` → `ok`; картинки реальных сайтов без «дыр»; RSS Wikipedia `< 40 MB`.
+Тикеты: `DROP-140` … `DROP-142`.
 
----
+### Phase 5 — Скорость и память как инженерия
+Скролл без relayout (сдвиг готового кадра), инкрементальный restyle/relayout по dirty-поддеревьям,
+проверка бюджетов `--bench` в тестах (регрессия = красный тест), замер холостого CPU и RAM
+многих вкладок, проверка что гибернация реально освобождает память.
+Тикеты: `DROP-150` … `DROP-153`.
 
-## Фазы развития
+### Phase 6 — Браузер на каждый день
+Формы GET/POST до конца (кодировки, `<select multiple>`, checkbox/radio), загрузки файлов,
+восстановление сессии, `about:history`/закладки, поиск по странице — довести до неделю-пригодного.
+Тикеты: `DROP-160` … `DROP-162`.
 
-### Phase 1 (`DROP-001`) — Core Pipeline `[DONE]`
-Базовый сквозной конвейер от URL до пикселей на экране без единой внешней зависимости (pure `std`):
-- **URL & Net:** парсер URL + разрешение относительных путей (`http://`, `file://`, `about:*`), HTTP/1.1 клиент с таймаутом 5с, `Transfer-Encoding: chunked` декодер, поддержка редиректов (до 5), встроенные страницы `about:droplet`, `about:roadmap`, `about:architecture`, `about:test`, `about:blank`.
-- **HTML & Arena DOM:** итеративный стековый HTML-парсер (UTF-8 safe, raw text `<style>`/`<script>`, entities, auto-close `<li>`/`<p>`), кэш-дружелюбный Arena DOM (`Vec<Node>` + `NodeId(usize)`).
-- **CSS & Style Tree:** парсер селекторов и правил, расчёт specificity `(id, class, tag)`, каскад и наследование свойств.
-- **Layout & Rasterizer:** Box Model + Block/Inline обтекание текста, встроенный 8x16 шрифт (ASCII + полная кириллица), плоский `DisplayList`, программный XRGB-растеризатор, hit-testing ссылок `<a href>`.
-- **Shell & Window:** история Back/Forward, динамический X11 backend через `dlopen("libX11.so.6")` и headless CLI (`--dump-dom`, `--dump-layout`, `--screenshot`).
+### Phase 7 — Решение по JavaScript (ADR)
+Выбрать и записать: (а) браузер без JS / с минимальным JS как фича «без мусора»; или (б) полноценный
+движок ES2020+ (годы работы). Самописное подмножество посередине бесполезно для реальных сайтов.
+Тикет: `DROP-170`.
 
----
+### Phase 8 — Безопасность
+Песочница подключена к GUI-процессу по-настоящему; фаззинг парсеров HTML/CSS/PNG/JPEG/TLS-записей
+(свой мини-мутатор без зависимостей); аудит ~400 мест `unsafe`.
+Тикеты: `DROP-180` … `DROP-182`.
 
-### Phase 2 (`DROP-002`) — Full Inline/Inline-Block & Flexbox Layout `[DONE]`
-Переход от базового block/inline-потока к современной вёрстке страниц:
-- **Реализовано:**
-  - `display: inline-block` (смешанное строчно-блочное позиционирование, перенос по строкам).
-  - Двухпроходный движок **Flexbox** (`display: flex`, `flex-direction`: `row`/`column`/`row-reverse`/`column-reverse`, `justify-content`, `align-items`, `flex-wrap`, `gap`, `flex-grow`/`flex-shrink`/`flex-basis`).
-  - Относительные единицы в `style`/`layout`: `%`, `em`, `rem`, `vh`, `vw`.
-  - Интерактивные псевдоклассы `:hover` и `:active` (`StyleContext`, `hit_test_node`, нулевой overhead на страницах без `:hover`/`:active` через `stylesheet_uses_interaction`).
-  - `Copy` `ComputedStyle` без `HashMap` и без per-node heap-аллокаций.
-- *Спецификация:* [DROP-002-inline-and-flexbox.md](.scratch/issues/DROP-002-inline-and-flexbox.md).
-
----
-
-### Phase 3 (`DROP-003`) — HTTPS (TLS) & Concurrent Resource Loader `[DONE]`
-Выход в современный веб (`https://`) и параллельная загрузка ресурсов без `Cargo.toml`-зависимостей:
-- **Реализовано:**
-  - `https://` на Linux через runtime `dlopen` системного OpenSSL (`libssl.so.4` / `libssl.so.3` / `libssl.so`), системные CA (`SSL_CTX_set_default_verify_paths`), SNI и проверку hostname (`SSL_set1_host`).
-  - HTTP/1.1 **Keep-Alive connection pool** (`POOL_MAX_PER_ORIGIN = 4`, `POOL_MAX_TOTAL = 32`, `POOL_IDLE_TTL = 30s`) с автоматическим переподключением на протухших сокетах.
-  - Внутрипроцессный **DNS TTL cache** (60s, max 256 записей) и поддержка `data:` URI (`fetch_uri_bytes`).
-  - Многопоточный загрузчик (`fetch_many`, пул до 4 `std::thread` воркеров) для `<link rel="stylesheet">` и подресурсов.
-  - Встроенный zero-alloc **tracker/ad domain filter** (`crates/droplet-net/src/adblock.rs` -> `TrackerFilter`) до DNS/TCP.
-- **Follow-up (вынесено в `DROP-011`):** нативный Windows Schannel TLS / macOS системный TLS (на не-Linux платформах сейчас возвращается явная ошибка `NetError`).
-- *Спецификация:* [DROP-003-https-and-external-css.md](.scratch/issues/DROP-003-https-and-external-css.md).
-
----
-
-### Phase 4 (`DROP-004`) — Crisp Typography, Image Decoding & Multi-Tab Shell `[DONE]`
-Сглаженная типографика на чистом Rust, декодирование изображений и минималистичная мульти-вкладочная оболочка:
-- **Реализовано:**
-  - Поиск системных TrueType шрифтов на Linux (`/usr/share/fonts/truetype/...`) и Windows (`C:\Windows\Fonts\...`) + pure-Rust `sfnt`/`glyf` парсер и anti-aliased сканлайн-растеризатор (`crates/droplet-font/src/lib.rs` -> `FontEngine`).
-  - Ограниченный `GlyphAtlas` (до `MAX_ATLAS_ENTRIES = 4096` записей) + автоматический fallback на вторичные шрифты (кириллица) и встроенный `8x16` bitmap шрифт.
-  - Pure-Rust декодер изображений (`crates/droplet-image/src/lib.rs` -> `DecodedImage`): **PNG** (включая Adam7 и палитры), **BMP**, **PPM (`P3`/`P6`)** и базовый статический **SVG** (`viewBox`, `<rect>`, `<circle>`, `<line>`, `<polygon>`, `<path>`) с защитой от dimension-бомб (`MAX_IMAGE_PIXELS = 64_000_000`).
-  - Replaced layout box для `<img>` с сохранением пропорций (aspect ratio) и fallback-блоком `alt`.
-  - Минималистичный chrome в `crates/droplet-paint/src/lib.rs` (`TAB_BAR_HEIGHT = 30`, `TOOLBAR_HEIGHT = 44`, `STATUS_BAR_HEIGHT = 0` с плавающей hover-пилюлей внизу слева, SDF скруглённые прямоугольники) + **Multi-Tab `TabState` & Tab Hibernation** (`MAX_WARM_TABS = 3`, `Ctrl+T` / `Ctrl+W` / `Ctrl+Tab`) и кроссплатформенный `crates/droplet-platform/src/` (`linux_x11.rs` + `windows.rs` + `macos.rs` stub).
-- **Follow-up (вынесено в `DROP-011`):** baseline **JPEG** (и опционально WebP) декодер, нативный Wayland-бэкенд и Windows Schannel TLS.
-- *Спецификация:* [DROP-004-truetype-fonts-and-images.md](.scratch/issues/DROP-004-truetype-fonts-and-images.md).
+### Phase 9 — Платформы
+Windows до паритета с Linux на корпусе; Wayland до паритета с X11; macOS — только с macOS-хостом.
+Тикеты: `DROP-190` … `DROP-192`.
 
 ---
 
-### Phase 5 (`DROP-005`) — Forms, Selection & Interactive Controls `[DONE]`
-Полноценное взаимодействие с формами и текстом на странице:
-- HTML-элементы управления: `<input>` (`text`, `password`, `checkbox`, `radio`, `submit`), `<textarea>`, `<button>`, `<select>`.
-- Система фокуса (`focused_node: Option<NodeId>`), навигация по `Tab` / `Shift+Tab`, визуальное кольцо фокуса (focus ring), отправка форм (`GET` / `POST` query-encoding).
-- Выделение текста мышью (`SelectionRange`), копирование/вставка через платформенный буфер обмена (X11 `CLIPBOARD`/`PRIMARY` + Win32 Clipboard в `crates/droplet-platform/src/`).
+## Кроссплатформенность
 
----
-
-### Phase 6 (`DROP-006`) — Persistent Bookmarks/History, Find-in-Page & DevTools `[DONE]`
-*(Примечание: базовый Multi-Tab UI `TabState`, горячие клавиши `Ctrl+T`/`Ctrl+W`/`Ctrl+Tab` и Tab Hibernation уже реализованы в Phase 4 / `browser.rs`.)*  
-Дальнейшее развитие daily-driver оболочки и инструментов разработчика:
-- Персистентные закладки и история посещений (компактный бинарный store `crates/droplet-storage` с быстрым префиксным автодополнением в адресной строке, `about:history` / `about:bookmarks`).
-- Поиск по странице (`Ctrl+F` с подсветкой совпадений и переходами `Enter`/`Shift+Enter`), быстрое переключение вкладок `Ctrl+1..9`.
-- Встроенный **Box Model Inspector Overlay** (подсветка `content` / `padding` / `border` / `margin` под курсором, просмотр дерева DOM/ComputedStyle).
-
----
-
-### Phase 7 (`DROP-007`, `DROP-008`) — Minimalist Scripting & Reactive DOM `[DONE]`
-Поддержка базового клиентского JavaScript без монструозного JIT:
-- **DROP-007 (Bytecode VM — `DONE`):** компактный парсер и стековая bytecode VM в `crates/droplet-js` (переменные, функции, замыкания, объекты, массивы, базовый event loop и таймеры).
-- **DROP-008 (Reactive DOM Bindings — `DONE`):** `DomHost` + минимальные DOM API (`document.querySelector`, `getElementById`, `addEventListener`, `textContent`, `classList`, `style`), диспетчеризация событий (bubbling + `preventDefault`/`stopPropagation`) и `DirtyFlags` для инкрементального relayout/repaint.
-
----
-
-### Phase 8 (`DROP-009`, `DROP-010`) — Hardware GPU Rendering & Multi-Process Sandbox `[DONE]`
-Финальный уровень производительности и безопасности:
-- **DROP-009 (Hardware GPU / Zero-Copy Blitting — `DONE`):** X11 `MIT-SHM`, Win32 `DIBSection` (`BitBlt`), Wayland `wl_shm` `damage_buffer`, external-slice `Canvas` и `DamageRect`-трекинг без лишних копирований буфера кадра.
-- **DROP-010 (Multi-Process Sandbox — `DONE`):** разделение на привилегированный Browser/UI-процесс (`RendererHost` в `apps/droplet-desktop`) и изолированные `--renderer`-процессы (`crates/droplet-sandbox`: Linux `seccomp-bpf` + namespaces/`rlimit`, Windows Job Objects + Restricted Token, macOS `sandbox_init`; `crates/droplet-ipc`: `memfd`/shared framebuffer + бинарный IPC протокол; `HeadlessRenderer` в `crates/droplet-shell`).
-
----
-
-### Phase 9 / Cross-Platform & Media Polish (`DROP-011`) — Wayland, Windows Schannel TLS & JPEG `[DONE]`
-Доводка кроссплатформенного стека и недостающих форматов без добавления тяжёлых крейтов:
-- **Wayland Native Client (`crates/droplet-platform/src/linux_wayland.rs`):** runtime `dlopen("libwayland-client.so.0")` + `xdg-shell` + shared-memory (`memfd_create` / `wl_shm`) с автоматическим fallback на X11 (`linux_x11.rs`), если Wayland compositor недоступен.
-- **Windows Schannel TLS (`crates/droplet-net/src/lib.rs`):** нативный TLS-клиент на Windows через `secur32.dll` / `crypt32.dll` (`InitializeSecurityContextW` + проверка системного хранилища сертификатов Windows) для работы `https://` без OpenSSL.
-- **Pure-Rust Baseline JPEG Decoder (`crates/droplet-image/src/lib.rs`):** декодирование baseline DCT JPEG (`SOF0`, Huffman tables, YCbCr -> RGBA8, защита `MAX_IMAGE_PIXELS = 64_000_000`) в чистом Rust без сторонних крейтов.
-- **macOS Cocoa/Metal (`crates/droplet-platform/src/macos.rs`):** реализация нативного окна Cocoa + `CAMetalLayer`/`CGContext` при сборке на macOS с Apple SDK.
+Весь оконный/FFI-код — в `crates/droplet-platform/src/` под `#[cfg(target_os = ...)]`.
+Ядро (`url`, `net`, `dom`, `style`, `layout`, `image`, `paint`, `shell`) — чистый `std`.
+Linux X11 — основной; Wayland работает (dlopen, авто-выбор), но заморожен до P9;
+Windows (Win32 + Schannel) собирается, паритет — P9; macOS не собирается на Ubuntu.

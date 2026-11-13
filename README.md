@@ -5,6 +5,10 @@ It is a Cargo workspace of focused engine crates with **zero external crate depe
 
 ---
 
+> **Status (Nov 2026 re-baseline):** the core pipeline works and is fast, but much of CSS layout is
+> still missing — only 4 of 12 pages in `tests/corpus` render correctly (no tables, `position`,
+> `float`, `@media`, …). See [ROADMAP.md](ROADMAP.md) for the honest scoreboard and phases.
+
 ## Features
 
 - **HTTPS, Keep-Alive & Built-In Tracker Blocker:**
@@ -14,8 +18,8 @@ It is a Cargo workspace of focused engine crates with **zero external crate depe
 - **Modern Layout, Forms & Interactive CSS:**
   - Two-pass **Flexbox** (`display: flex`, `flex-direction`, `flex-wrap`, `justify-content`, `align-items`, `gap`, `flex-grow`/`flex-shrink`/`flex-basis`) and `display: inline-block`.
   - Relative units (`%`, `em`, `rem`, `vh`, `vw`), rounded rectangles (`border-radius`), `:hover` / `:active` pseudo-classes, and HTML form controls (`<input>`, `<textarea>`, `<button>`, `<select>`) with `Tab`/`Shift+Tab` focus, caret editing, text selection, and clipboard integration.
-- **Embedded JavaScript VM & Reactive DOM:**
-  - Pure-Rust bytecode VM (`crates/droplet-js`) with `DomHost` bindings (`document.getElementById`, `querySelector`, `querySelectorAll`, `addEventListener`, `textContent`, `innerHTML`, `classList`, `style`, timers), event bubbling (`preventDefault` / `stopPropagation`), and `DirtyFlags` incremental style/layout/display-list updates.
+- **Experimental JavaScript VM (off by default, enable with `--js`):**
+  - Covers only an ES subset (no `new`, classes or template literals yet), so it is disabled until the Phase 7 decision. Pure-Rust bytecode VM (`crates/droplet-js`) with `DomHost` bindings (`document.getElementById`, `querySelector`, `querySelectorAll`, `addEventListener`, `textContent`, `innerHTML`, `classList`, `style`, timers), event bubbling (`preventDefault` / `stopPropagation`), and `DirtyFlags` incremental style/layout/display-list updates.
 - **Anti-Aliased TrueType Fonts & Image Decoding:**
   - System TrueType font discovery on Linux (`/usr/share/fonts/...`) and Windows (`C:\Windows\Fonts\...`) with a pure-Rust `sfnt`/`glyf` AA scanline rasterizer, bounded `GlyphAtlas` (`4096` entries), and `8x16` ASCII + Cyrillic bitmap fallback.
   - Pure-Rust **PNG, baseline JPEG, BMP, PPM (`P3`/`P6`), and static SVG** image decoder (`crates/droplet-image`) with a 64M-pixel bomb guard and `<img>` replaced layout boxes (`alt`-text fallback on error).
@@ -26,7 +30,7 @@ It is a Cargo workspace of focused engine crates with **zero external crate depe
   - **Linux:** native **Wayland** (`wl_shm` + `xdg-shell` with `wl_surface.damage_buffer`, falling back automatically to **X11** `MIT-SHM` / `XPutImage`).
   - **Windows:** Win32 `CreateWindowExW` with persistent `DIBSection` direct rendering + `DamageRect` `BitBlt` (`StretchDIBits` fallback).
   - **macOS:** Cocoa/AppKit `NSView` + `CGContextClipToRect` dirty-rect presentation (verified via cross-compilation for `aarch64-apple-darwin`).
-  - **Sandboxed Renderer Worker (`--sandbox-screenshot` / `--renderer`):** privileged `RendererHost` pre-fetches resources over `droplet-net` and communicates with an isolated `HeadlessRenderer` worker over framed `DRIP` IPC + `memfd`/Win32 shared memory (`droplet-ipc`) under `droplet-sandbox` (Linux `seccomp-bpf` + best-effort user/net namespaces + `rlimit`; Windows Job Objects + Restricted Token; macOS `sandbox_init`).
+  - **Experimental sandboxed renderer worker (`cargo build --features sandbox`; `--sandbox-screenshot` / `--renderer`; not yet used by the GUI):** privileged `RendererHost` pre-fetches resources over `droplet-net` and communicates with an isolated `HeadlessRenderer` worker over framed `DRIP` IPC + `memfd`/Win32 shared memory (`droplet-ipc`) under `droplet-sandbox` (Linux `seccomp-bpf` + best-effort user/net namespaces + `rlimit`; Windows Job Objects + Restricted Token; macOS `sandbox_init`).
 
 ---
 
@@ -96,9 +100,18 @@ crates/droplet-shell/     Multi-tab browser session, loader, forms, find, JS DOM
 # Render a full frame (tabs + toolbar + page) to a binary PPM image
 /home/mrevds/.cargo/bin/cargo run -- --screenshot /tmp/out.ppm about:droplet
 
-# Render inside the sandboxed --renderer child process and write a PPM image
-/home/mrevds/.cargo/bin/cargo run -- --sandbox-screenshot /tmp/sandbox.ppm about:droplet
+# Per-stage benchmark: median ms for html/css/style/layout/display-list/raster + peak RSS
+/home/mrevds/.cargo/bin/cargo run --release -- --bench --runs 20 about:droplet
+
+# Enable the experimental JavaScript VM for any mode (off by default)
+/home/mrevds/.cargo/bin/cargo run -- --js --screenshot /tmp/out.ppm about:test
+
+# Experimental: render inside the sandboxed --renderer child (needs --features sandbox)
+/home/mrevds/.cargo/bin/cargo run --features sandbox -- --sandbox-screenshot /tmp/sandbox.ppm about:droplet
 ```
+
+`DROPLET_FONTS=builtin` forces the built-in 8x16 font (machine-independent metrics; used by the
+corpus layout goldens in [tests/corpus](tests/corpus/README.md)).
 
 ### Built-in `about:*` Pages
 - `about:droplet` — Welcome page & navigation hub
