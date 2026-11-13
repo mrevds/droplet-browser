@@ -40,6 +40,13 @@ dependencies = [
 [[package]]
 name = "droplet-image"
 version = "0.1.0"
+dependencies = [
+ "droplet-inflate",
+]
+
+[[package]]
+name = "droplet-inflate"
+version = "0.1.0"
 
 [[package]]
 name = "droplet-ipc"
@@ -62,6 +69,7 @@ dependencies = [
 name = "droplet-net"
 version = "0.1.0"
 dependencies = [
+ "droplet-inflate",
  "droplet-storage",
  "droplet-url",
 ]

@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 droplet-url = { path = "../droplet-url" }
 droplet-storage = { path = "../droplet-storage" }
+droplet-inflate = { path = "../droplet-inflate" }

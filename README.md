@@ -48,6 +48,7 @@ crates/droplet-style/     CSS parser, cascade, Copy ComputedStyle
 crates/droplet-layout/    Block/inline/flex/form layout, hit testing
 crates/droplet-gfx/       Canvas (owned & external-slice buffers), colors, DamageRect geometry
 crates/droplet-font/      TrueType discovery, sfnt/glyf rasterizer, glyph atlas
+crates/droplet-inflate/   DEFLATE / zlib / gzip decompression (PNG IDAT, HTTP Content-Encoding)
 crates/droplet-image/     PNG, baseline JPEG, BMP, PPM, and static SVG decoders
 crates/droplet-paint/     Flat display list, chrome, find/inspector/form overlays
 crates/droplet-platform/  Wayland, X11, Win32, macOS windowing & clipboard backends

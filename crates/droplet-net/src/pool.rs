@@ -273,7 +273,7 @@ fn execute_http_exchange(
          Host: {host_header}\r\n\
          User-Agent: Droplet/0.1\r\n\
          Accept: text/html,text/css,image/*,*/*\r\n\
-         Accept-Encoding: identity\r\n\
+         Accept-Encoding: gzip, deflate\r\n\
          Connection: keep-alive\r\n"
     );
     if let Some(body) = body {
@@ -329,6 +329,8 @@ struct ParsedHeaders {
     is_chunked: bool,
     content_length: Option<usize>,
     server_close: bool,
+    /// `Content-Encoding` tokens in the order they were applied (lowercase).
+    content_encoding: Vec<String>,
 }
 
 fn parse_headers_block(header_bytes: &[u8], url: &Url) -> Result<ParsedHeaders, NetError> {
@@ -346,6 +348,7 @@ fn parse_headers_block(header_bytes: &[u8], url: &Url) -> Result<ParsedHeaders, 
     let mut content_length: Option<usize> = None;
     let mut has_close = false;
     let mut has_keep_alive = false;
+    let mut content_encoding: Vec<String> = Vec::new();
 
     for raw_line in lines {
         let line = raw_line.trim_end_matches('\r');
@@ -360,6 +363,12 @@ fn parse_headers_block(header_bytes: &[u8], url: &Url) -> Result<ParsedHeaders, 
         match key.as_str() {
             "content-type" if !value.is_empty() => content_type = value.to_string(),
             "location" if !value.is_empty() => location = Some(value.to_string()),
+            "content-encoding" => content_encoding.extend(
+                value
+                    .split(',')
+                    .map(|t| t.trim().to_ascii_lowercase())
+                    .filter(|t| !t.is_empty()),
+            ),
             "transfer-encoding" => {
                 if value.to_ascii_lowercase().contains("chunked") {
                     is_chunked = true;
@@ -401,6 +410,7 @@ fn parse_headers_block(header_bytes: &[u8], url: &Url) -> Result<ParsedHeaders, 
         is_chunked,
         content_length,
         server_close,
+        content_encoding,
     })
 }
 
@@ -489,6 +499,8 @@ fn read_http_response(
         let body = read_until_eof_streaming(stream, leftover, url)?;
         (body, false)
     };
+
+    let body = decode_content_encoding(body, &headers.content_encoding, url)?;
 
     let can_reuse = !headers.server_close && clean_boundary;
     Ok(ExchangeOutcome::Complete {
@@ -732,8 +744,46 @@ pub fn parse_http_response(
     } else {
         raw_body.to_vec()
     };
+    let body = decode_content_encoding(body, &headers.content_encoding, &url)?;
 
     Ok((headers.status, headers.content_type, headers.location, body))
+}
+
+/// Undoes `Content-Encoding` (applied left to right, so removed right to left). The decoded
+/// size is capped at `MAX_RESPONSE_BYTES` while inflating, so a compression bomb fails fast
+/// instead of allocating (DROP-112).
+fn decode_content_encoding(
+    body: Vec<u8>,
+    encodings: &[String],
+    url: &Url,
+) -> Result<Vec<u8>, NetError> {
+    if body.is_empty() {
+        return Ok(body);
+    }
+    let mut data = body;
+    for encoding in encodings.iter().rev() {
+        let decoded = match encoding.as_str() {
+            "identity" => continue,
+            "gzip" | "x-gzip" => droplet_inflate::gunzip(&data, MAX_RESPONSE_BYTES),
+            // RFC 9110 says zlib, but some servers send raw DEFLATE: accept both.
+            "deflate" if droplet_inflate::looks_like_zlib(&data) => {
+                droplet_inflate::inflate_zlib(&data, MAX_RESPONSE_BYTES)
+            }
+            "deflate" => droplet_inflate::inflate_raw(&data, MAX_RESPONSE_BYTES),
+            other => {
+                return Err(NetError {
+                    message: format!("Unsupported Content-Encoding '{other}' from '{}'", url.host),
+                });
+            }
+        };
+        data = decoded.map_err(|err| NetError {
+            message: format!(
+                "Failed to decode {encoding} response from '{}': {err}",
+                url.host
+            ),
+        })?;
+    }
+    Ok(data)
 }
 
 fn find_header_terminator(raw: &[u8]) -> Option<(usize, usize)> {

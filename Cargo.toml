@@ -7,6 +7,7 @@ default-members = [
     "crates/droplet-dom",
     "crates/droplet-style",
     "crates/droplet-gfx",
+    "crates/droplet-inflate",
     "crates/droplet-image",
     "crates/droplet-font",
     "crates/droplet-js",

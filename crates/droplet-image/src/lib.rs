@@ -3,7 +3,6 @@
 use std::fmt;
 
 mod bmp;
-mod deflate;
 mod jpeg;
 mod png;
 mod ppm;
@@ -31,6 +30,12 @@ impl ImageError {
         Self {
             message: message.into(),
         }
+    }
+}
+
+impl From<droplet_inflate::InflateError> for ImageError {
+    fn from(err: droplet_inflate::InflateError) -> Self {
+        Self::new(format!("PNG zlib data: {err}"))
     }
 }
 

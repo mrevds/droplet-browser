@@ -85,10 +85,14 @@ The orchestration layer (`crates/droplet-shell/src/` -> `Browser`) manages multi
 - **Concurrency & Limits:** `fetch_many` uses a bounded `std::thread::scope` pool (`MAX_CONCURRENT_FETCHES = 4`); enforces `CONNECT_TIMEOUT = 10 s` (all resolved addresses), `HANDSHAKE_TIMEOUT = 15 s` (total, retried across socket waits — DROP-111), `READ_TIMEOUT = 15 s` idle, `MAX_REDIRECTS = 5`, `MAX_HEADER_BYTES = 64 KiB`, and `MAX_RESPONSE_BYTES = 16 MiB`.
 - **Built-in & User Pages (`about.rs`, `user_pages.rs`):** `about:droplet`, `about:roadmap`, `about:architecture`, `about:test`, `about:blank`, plus dynamic HTML views for `about:history` and `about:bookmarks`.
 
+### 3b. DEFLATE / zlib / gzip (`crates/droplet-inflate/src/lib.rs`, DROP-112)
+- Dependency-free crate shared by `droplet-image` (PNG `IDAT`) and `droplet-net` (`Content-Encoding`): `inflate_raw`, `inflate_zlib` (Adler-32), `gunzip` (RFC 1952 header flags, multi-member, CRC-32 + ISIZE per member, NUL padding tolerated), `looks_like_zlib`, table-driven `crc32`. Every call takes `max_out` and fails *before* producing bytes past it, so a decompression bomb never allocates past the limit (`MAX_RESPONSE_BYTES = 16 MiB` for HTTP). Huffman decoding is bit-at-a-time: ~5.6 ms for the 1 MB Wikipedia article (C zlib: ~2.4 ms).
+- `droplet-net` sends `Accept-Encoding: gzip, deflate` and undoes `Content-Encoding` right to left after de-chunking (`gzip`/`x-gzip`, `deflate` as zlib or raw, `identity`); an unknown encoding or a corrupt stream is a load error, never rendered as text.
+
 ### 4. Pure-Rust Image Decoder (`crates/droplet-image/src/`)
 - `DecodedImage`: `{ pub width: u32, pub height: u32, pub rgba: Vec<u8> }` (row-major RGBA8); `ImageError`: `{ pub message: String }`.
 - `decode(&[u8]) -> Result<DecodedImage, ImageError>` sniffs magic bytes and decodes in pure Rust (zero external crates):
-  - **PNG (`png.rs`, `deflate.rs`):** full chunk reader, DEFLATE/zlib inflate, all 5 scanline predictors (`None`/`Sub`/`Up`/`Average`/`Paeth`), Adam7 interlacing, grayscale/RGB/RGBA/indexed `PLTE` + `tRNS`.
+  - **PNG (`png.rs` + `droplet-inflate`):** full chunk reader, DEFLATE/zlib inflate, all 5 scanline predictors (`None`/`Sub`/`Up`/`Average`/`Paeth`), Adam7 interlacing, grayscale/RGB/RGBA/indexed `PLTE` + `tRNS`.
   - **Baseline JPEG (`jpeg.rs`):** baseline DCT (`SOF0`) decoder supporting Huffman tables (`DHT`), quantization tables (`DQT`), grayscale and `4:2:0` / `4:4:4` chroma subsampling, `DRI` restart intervals, YCbCr -> RGBA8 conversion, clean rejection of progressive `SOF2` streams, and truncation checks.
   - **BMP (`bmp.rs`), PPM (`ppm.rs`):** uncompressed/RLE BMP and ASCII `P3` / binary `P6` PPM.
   - **Static SVG (`svg.rs`):** XML preamble + `<svg>` (`viewBox`, `<rect>`, `<circle>`, `<line>`, `<polygon>`, `<path>` fill/stroke rasterization).

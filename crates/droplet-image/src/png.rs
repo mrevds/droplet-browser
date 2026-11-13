@@ -1,6 +1,7 @@
 //! PNG decoder (chunks, PLTE/tRNS, scanline unfiltering, and Adam7 interlacing).
 
-use crate::deflate::inflate_zlib;
+use droplet_inflate::inflate_zlib;
+
 use crate::{validate_dimensions, DecodedImage, ImageError};
 
 fn crc32(parts: &[&[u8]]) -> u32 {
@@ -535,7 +536,7 @@ pub(crate) fn push_png_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], payload: &
 mod tests {
     use super::*;
     use crate::decode;
-    use crate::deflate::adler32;
+    use droplet_inflate::adler32;
 
     fn zlib_stored(raw: &[u8]) -> Vec<u8> {
         let mut z = vec![0x78, 0x01]; // CMF=8/32K, FLG=1 ((0x7801 % 31) == 0)

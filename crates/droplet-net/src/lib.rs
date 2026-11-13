@@ -891,4 +891,110 @@ mod tests {
         assert!(resp.body.contains("OK"));
         server.join().unwrap();
     }
+
+    // ---- DROP-112: Content-Encoding ---------------------------------------------------
+    const HTTP_GZ_HTML: &[u8] = &[31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 179, 201, 40, 201, 205, 177, 179, 201, 72, 77, 76, 177, 179, 41, 201, 44, 201, 73, 181, 187, 176, 240, 194, 182, 11, 27, 46, 54, 93, 216, 103, 163, 15, 17, 177, 209, 135, 200, 39, 229, 167, 84, 218, 217, 20, 216, 93, 152, 127, 177, 225, 194, 142, 11, 155, 46, 108, 189, 216, 164, 163, 144, 94, 149, 89, 160, 104, 163, 95, 48, 42, 51, 42, 51, 42, 51, 242, 100, 244, 33, 197, 130, 62, 184, 36, 1, 0, 138, 145, 148, 234, 80, 4, 0, 0];
+    const HTTP_RAW_DEFLATE: &[u8] = &[179, 41, 176, 43, 74, 44, 87, 72, 73, 77, 203, 73, 44, 73, 85, 184, 216, 116, 97, 235, 133, 221, 23, 246, 217, 232, 23, 216, 1, 0];
+    const HTTP_GZ_HTML_LEN: usize = 1104;
+
+
+    /// Serves one request with the given raw response; returns (url, request-head receiver).
+    fn one_shot_server(response: Vec<u8>) -> (Url, mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            sock.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let head = read_http_request_head(&mut sock);
+            let _ = tx.send(head);
+            let _ = sock.write_all(&response);
+        });
+        let url = Url::parse(&format!("http://127.0.0.1:{}/page", addr.port())).unwrap();
+        (url, rx, handle)
+    }
+
+    fn chunked(body: &[u8], chunk: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for part in body.chunks(chunk) {
+            out.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+            out.extend_from_slice(part);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    #[test]
+    fn chunked_gzip_response_is_decoded_and_gzip_is_advertised() {
+        let mut resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        resp.extend_from_slice(&chunked(HTTP_GZ_HTML, 37));
+        let (url, head_rx, server) = one_shot_server(resp);
+        let r = fetch(&url).unwrap();
+        let head = head_rx.recv().unwrap().to_ascii_lowercase();
+        assert!(head.contains("accept-encoding: gzip, deflate"), "{head}");
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body.len(), HTTP_GZ_HTML_LEN);
+        assert!(r.body.starts_with("<html><head><title>Сжато</title>"));
+        assert_eq!(r.body.matches("Привет, gzip!").count(), 40);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn raw_deflate_with_content_length_is_decoded() {
+        let mut resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: deflate\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            HTTP_RAW_DEFLATE.len()
+        )
+        .into_bytes();
+        resp.extend_from_slice(HTTP_RAW_DEFLATE);
+        let (url, _rx, server) = one_shot_server(resp);
+        assert_eq!(fetch(&url).unwrap().body, "<p>raw deflate тело</p>");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn corrupt_and_unsupported_encodings_are_reported_not_rendered() {
+        let mut bad = HTTP_GZ_HTML.to_vec();
+        let n = bad.len();
+        bad[n - 6] ^= 0x55; // CRC32 trailer byte
+        let mut resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {n}\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        resp.extend_from_slice(&bad);
+        let (url, _rx, server) = one_shot_server(resp);
+        let err = fetch(&url).unwrap_err();
+        assert!(err.message.contains("Failed to decode gzip") && err.message.contains("CRC-32"), "{}", err.message);
+        server.join().unwrap();
+
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc".to_vec();
+        let (url, _rx, server) = one_shot_server(resp);
+        let err = fetch(&url).unwrap_err();
+        assert!(err.message.contains("Unsupported Content-Encoding 'br'"), "{}", err.message);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn identity_encoding_and_empty_bodies_pass_through() {
+        let body = "чисто".as_bytes();
+        let mut resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        resp.extend_from_slice(body);
+        let (url, _rx, server) = one_shot_server(resp);
+        assert_eq!(fetch(&url).unwrap().body, "чисто");
+        server.join().unwrap();
+
+        let (status, _, _, body) = parse_http_response(
+            b"HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\n\r\n",
+            Url::parse("http://example.com/").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status, 304);
+        assert!(body.is_empty());
+    }
 }
+
