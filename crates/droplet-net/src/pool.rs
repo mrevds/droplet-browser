@@ -193,6 +193,23 @@ enum ExchangeOutcome {
 }
 
 pub(crate) fn send_http_get(url: &Url) -> Result<RawHttpResponse, NetError> {
+    send_http_request(url, "GET", None, None)
+}
+
+pub(crate) fn send_http_post(
+    url: &Url,
+    body: &str,
+    content_type: &str,
+) -> Result<RawHttpResponse, NetError> {
+    send_http_request(url, "POST", Some(body), Some(content_type))
+}
+
+fn send_http_request(
+    url: &Url,
+    method: &str,
+    body: Option<&str>,
+    content_type: Option<&str>,
+) -> Result<RawHttpResponse, NetError> {
     let Some(skey) = scheme_key(&url.scheme) else {
         return Err(NetError {
             message: format!("Unsupported network scheme for {}", url.as_str()),
@@ -201,7 +218,7 @@ pub(crate) fn send_http_get(url: &Url) -> Result<RawHttpResponse, NetError> {
     let pool_key = (skey, url.host.clone(), url.port);
 
     if let Some(mut pooled) = take_pooled_conn(&pool_key) {
-        match execute_http_exchange(&mut pooled, url, true)? {
+        match execute_http_exchange(&mut pooled, url, true, method, body, content_type)? {
             ExchangeOutcome::Complete { parsed, can_reuse } => {
                 if can_reuse {
                     return_pooled_conn(pool_key, pooled);
@@ -215,7 +232,7 @@ pub(crate) fn send_http_get(url: &Url) -> Result<RawHttpResponse, NetError> {
     }
 
     let mut fresh = connect_stream(url)?;
-    match execute_http_exchange(&mut fresh, url, false)? {
+    match execute_http_exchange(&mut fresh, url, false, method, body, content_type)? {
         ExchangeOutcome::Complete { parsed, can_reuse } => {
             if can_reuse {
                 return_pooled_conn(pool_key, fresh);
@@ -232,19 +249,37 @@ fn execute_http_exchange(
     stream: &mut TransportStream,
     url: &Url,
     is_reused: bool,
+    method: &str,
+    body: Option<&str>,
+    content_type: Option<&str>,
 ) -> Result<ExchangeOutcome, NetError> {
     let target = url.request_target();
     let host_header = url.host_header();
 
-    let request = format!(
-        "GET {target} HTTP/1.1\r\n\
+    let mut request = format!(
+        "{method} {target} HTTP/1.1\r\n\
          Host: {host_header}\r\n\
          User-Agent: Droplet/0.1\r\n\
          Accept: text/html,text/css,image/*,*/*\r\n\
          Accept-Encoding: identity\r\n\
-         Connection: keep-alive\r\n\
-         \r\n"
+         Connection: keep-alive\r\n"
     );
+    if let Some(body) = body {
+        let content_type = content_type.unwrap_or("application/x-www-form-urlencoded");
+        if content_type.contains('\r') || content_type.contains('\n') {
+            return Err(NetError {
+                message: "Invalid HTTP content type".into(),
+            });
+        }
+        request.push_str(&format!(
+            "Content-Type: {content_type}\r\nContent-Length: {}\r\n",
+            body.len()
+        ));
+    }
+    request.push_str("\r\n");
+    if let Some(body) = body {
+        request.push_str(body);
+    }
 
     if let Err(err) = write_all_retry_eintr(stream, request.as_bytes()) {
         if is_reused {

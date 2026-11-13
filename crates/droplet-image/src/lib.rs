@@ -119,6 +119,13 @@ mod tests {
         // SVG 100_000 x 100_000 bomb
         assert!(decode(b"<svg width=\"100000\" height=\"100000\"></svg>").is_err());
 
+        // JPEG 10_000 x 10_000 bomb (exceeds MAX_IMAGE_PIXELS)
+        let mut jpeg_bomb = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 8];
+        jpeg_bomb.extend_from_slice(&10_000u16.to_be_bytes());
+        jpeg_bomb.extend_from_slice(&10_000u16.to_be_bytes());
+        jpeg_bomb.extend_from_slice(&[1, 1, 0x11, 0, 0xFF, 0xD9]);
+        assert!(decode(&jpeg_bomb).is_err());
+
         // Corrupt / truncated JPEG / empty inputs
         assert!(decode(b"").is_err());
         assert!(decode(b"\xFF\xD8\xFF\xE0\x00\x10JFIF").is_err());

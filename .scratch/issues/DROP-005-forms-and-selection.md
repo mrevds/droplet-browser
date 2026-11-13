@@ -1,9 +1,9 @@
 # DROP-005: Forms, Focus, Selection & Clipboard
 
 - **Phase:** 5
-- **Status:** `in-progress`
+- **Status:** `done`
 - **Blocked By:** `DROP-002` (`done`)
-- **Implementation owner:** DeepSeek V4.1 Flash Free (OpenCode agent)
+- **Implementation owner:** Swarm Wave 1 (`forms`)
 
 ---
 

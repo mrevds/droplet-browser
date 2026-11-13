@@ -9,9 +9,13 @@ default-members = [
     "crates/droplet-gfx",
     "crates/droplet-image",
     "crates/droplet-font",
+    "crates/droplet-js",
+    "crates/droplet-ipc",
+    "crates/droplet-sandbox",
     "crates/droplet-layout",
     "crates/droplet-paint",
     "crates/droplet-platform",
+    "crates/droplet-storage",
     "crates/droplet-shell",
     "apps/droplet-desktop",
 ]

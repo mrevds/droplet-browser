@@ -17,6 +17,7 @@ pub struct StyleContext {
     pub viewport_height: f32,
     pub hovered_node: Option<NodeId>,
     pub active_node: Option<NodeId>,
+    pub focused_node: Option<NodeId>,
 }
 
 impl Default for StyleContext {
@@ -26,6 +27,7 @@ impl Default for StyleContext {
             viewport_height: 768.0,
             hovered_node: None,
             active_node: None,
+            focused_node: None,
         }
     }
 }
@@ -134,12 +136,34 @@ img {
     display: inline-block;
 }
 
-button {
+input, textarea, select, button {
     display: inline-block;
-    padding: 6px 12px;
-    border: 1px solid #cbd5e1;
+    font-size: 14px;
+    color: #0f172a;
+}
+
+textarea, select {
+    background-color: #ffffff;
+}
+
+textarea, select, button {
+    padding: 5px 8px;
+    border: 1px solid #94a3b8;
     border-radius: 6px;
+}
+
+textarea {
+    width: 240px;
+    height: 64px;
+}
+
+button {
+    padding: 6px 12px;
     background-color: #f8fafc;
+}
+
+input:focus, textarea:focus, select:focus, button:focus {
+    border-color: #2563eb;
 }
 
 hr {
@@ -181,7 +205,10 @@ pub fn stylesheet_uses_interaction(css: &Stylesheet) -> bool {
     css.rules.iter().any(|rule| {
         rule.selectors.iter().any(|sel| {
             !sel.parts.iter().any(|(_, c)| c.unsupported_pseudo)
-                && sel.parts.iter().any(|(_, c)| c.hover || c.active)
+                && sel
+                    .parts
+                    .iter()
+                    .any(|(_, c)| c.hover || c.active || c.focus)
         })
     })
 }
@@ -521,6 +548,9 @@ fn matches_compound(
         return false;
     }
     if sel.active && !cascade.active_ancestors.contains(&node_id) {
+        return false;
+    }
+    if sel.focus && cascade.style_ctx.focused_node != Some(node_id) {
         return false;
     }
     true
@@ -1411,8 +1441,7 @@ mod tests {
         let ctx = StyleContext {
             viewport_width: 1200.0,
             viewport_height: 800.0,
-            hovered_node: None,
-            active_node: None,
+            ..StyleContext::default()
         };
         let tree = style_tree_with_context(&doc, &Stylesheet::default(), &ctx).unwrap();
         let styled_body = &tree.children[0].children[0];
@@ -1588,5 +1617,61 @@ mod tests {
 
         let styled_img = &styled_body.children[3];
         assert_eq!(styled_img.style.display, Display::InlineBlock);
+    }
+
+    #[test]
+    fn test_ua_form_control_defaults_and_focus_pseudo() {
+        let mut doc = Document::new();
+        let body = doc.create_element("body", Vec::new());
+        let input = doc.create_element(
+            "input",
+            attrs(&[("type", "text"), ("name", "q"), ("placeholder", "Поиск")]),
+        );
+        let area = doc.create_element("textarea", Vec::new());
+        let select = doc.create_element("select", Vec::new());
+        let option = doc.create_element("option", Vec::new());
+        let button = doc.create_element("button", Vec::new());
+        doc.append_child(doc.root(), body);
+        doc.append_child(body, input);
+        doc.append_child(body, area);
+        doc.append_child(body, select);
+        doc.append_child(select, option);
+        doc.append_child(body, button);
+
+        let css = css::parse("input:focus { border-color: #2563eb; }");
+        assert!(stylesheet_uses_interaction(&css));
+
+        let ctx = StyleContext {
+            focused_node: Some(input),
+            ..StyleContext::default()
+        };
+        let tree = style_tree_with_context(&doc, &css, &ctx).unwrap();
+        let styled_body = &tree.children[0];
+        let styled_input = &styled_body.children[0];
+        assert_eq!(styled_input.style.display, Display::InlineBlock);
+        assert_eq!(styled_input.style.font_size, 14.0);
+        assert_eq!(styled_input.style.border_color, Color::rgb(0x25, 0x63, 0xeb));
+
+        let unstyled_input = &style_tree_with_context(&doc, &css, &StyleContext::default())
+            .unwrap()
+            .children[0]
+            .children[0];
+        assert_ne!(
+            unstyled_input.style.border_color,
+            Color::rgb(0x25, 0x63, 0xeb)
+        );
+
+        let styled_area = &styled_body.children[1];
+        assert_eq!(styled_area.style.width, Some(240.0));
+        assert_eq!(styled_area.style.height, Some(64.0));
+        assert_eq!(styled_area.style.padding.left, 8.0);
+
+        let styled_select = &styled_body.children[2];
+        assert_eq!(styled_select.style.display, Display::InlineBlock);
+        assert_eq!(styled_select.style.padding.top, 5.0);
+
+        let styled_button = &styled_body.children[3];
+        assert_eq!(styled_button.style.display, Display::InlineBlock);
+        assert_eq!(styled_button.style.border_radius, 6.0);
     }
 }

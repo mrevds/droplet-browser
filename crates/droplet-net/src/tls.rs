@@ -173,6 +173,12 @@ mod imp {
 
     impl Drop for TlsStream {
         fn drop(&mut self) {
+            self.close();
+        }
+    }
+
+    impl TlsStream {
+        pub fn close(&mut self) {
             if !self.ssl.is_null() {
                 if let Ok(rt) = runtime() {
                     unsafe {
@@ -182,9 +188,7 @@ mod imp {
                 self.ssl = ptr::null_mut();
             }
         }
-    }
 
-    impl TlsStream {
         pub fn connect(tcp: TcpStream, host: &str) -> Result<Self, NetError> {
             let rt = runtime()?;
             let clean_host = strip_ipv6_brackets(host);
@@ -402,7 +406,12 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+mod imp {
+    pub(crate) use crate::tls_schannel::TlsStream;
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod imp {
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpStream;
@@ -415,10 +424,13 @@ mod imp {
         pub fn connect(_tcp: TcpStream, host: &str) -> Result<Self, NetError> {
             Err(NetError {
                 message: format!(
-                    "HTTPS to '{host}' is not yet enabled on this OS (Windows/non-Linux TLS will use Schannel/system TLS)"
+                    "HTTPS to '{host}' is not yet enabled on this OS (macOS will use a system TLS backend)"
                 ),
             })
         }
+
+        #[allow(dead_code)]
+        pub fn close(&mut self) {}
     }
 
     impl Read for TlsStream {

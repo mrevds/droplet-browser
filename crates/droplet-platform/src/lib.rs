@@ -1,6 +1,12 @@
 //! Cross-platform native graphical windowing backends.
 
-pub use droplet_gfx::{Canvas, Color};
+pub mod clipboard;
+
+pub use droplet_gfx::{Canvas, Color, DamageRect};
+pub use clipboard::{get_text as clipboard_get_text, set_text as clipboard_set_text};
+
+#[cfg(target_os = "linux")]
+mod linux_wayland;
 
 #[cfg(target_os = "linux")]
 mod linux_x11;
@@ -29,7 +35,26 @@ pub enum NavKey {
     CloseTab,
     NextTab,
     PrevTab,
+    /// Switch to the zero-based tab index (Ctrl+1..9); out-of-range is ignored.
+    SwitchTab(usize),
     GoHome,
+    ToggleBookmark,
+    Find,
+    FindNext,
+    FindPrev,
+    AcceptCompletion,
+    ToggleInspector,
+}
+
+/// Caret movement requested from a native keyboard backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaretMove {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
 }
 
 /// Application interface driven by native OS windowing backends.
@@ -47,16 +72,101 @@ pub trait PlatformApp {
     fn handle_text_input(&mut self, ch: char);
     fn handle_backspace(&mut self);
     fn handle_submit_url(&mut self);
+    /// Whether printable keys should be treated as text input (address bar or
+    /// find bar) instead of page-level shortcuts such as space-to-page-down.
+    fn wants_text_input(&self) -> bool {
+        self.url_focused()
+    }
+    /// Enter/Shift+Enter dispatch. Default submits the address bar when focused.
+    fn handle_enter(&mut self, _shift: bool) {
+        if self.url_focused() {
+            self.handle_submit_url();
+        }
+    }
     fn handle_key_navigation(&mut self, key: NavKey);
     fn render_into(&mut self, canvas: &mut Canvas);
+
+    /// Moves keyboard focus to the next/previous form control (Tab/Shift+Tab).
+    fn handle_tab_focus(&mut self, _backwards: bool) {}
+    /// Moves the text caret; `extend` grows the selection (Shift+Arrow).
+    fn handle_caret(&mut self, _movement: CaretMove, _extend: bool) {}
+    /// Deletes the character after the caret (Delete key).
+    fn handle_delete(&mut self) {}
+    /// Activates the focused control (Enter/Space).
+    fn handle_activate(&mut self) {}
+    fn handle_select_all(&mut self) {}
+    fn handle_copy(&mut self) {}
+    fn handle_cut(&mut self) {}
+    fn handle_paste(&mut self) {}
+    /// Returns the dirty region since the last render, or `None` when a full repaint is needed.
+    fn take_damage(&mut self) -> Option<DamageRect> {
+        None
+    }
+    /// Informs the app which presentation backend (`"shm"`, `"dmabuf"`, `"jpeg"`, etc.) is active.
+    fn set_present_backend(&mut self, _backend: &'static str) {}
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn env_var_nonempty(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn wayland_env_present() -> bool {
+    env_var_nonempty("WAYLAND_DISPLAY") && env_var_nonempty("XDG_RUNTIME_DIR")
+}
+
+/// Pure fallback decision: Wayland is attempted only when both Wayland
+/// environment variables are present and the client library loaded.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn wayland_candidate(
+    wayland_display_present: bool,
+    xdg_runtime_dir_present: bool,
+    library_available: bool,
+) -> bool {
+    wayland_display_present && xdg_runtime_dir_present && library_available
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn backend_error_message(wayland_error: Option<&str>, x11_error: &str) -> String {
+    match wayland_error {
+        Some(wayland_error) => format!(
+            "Wayland backend unavailable ({wayland_error}); X11 fallback also failed ({x11_error})"
+        ),
+        None => format!("X11 backend failed ({x11_error})"),
+    }
 }
 
 /// Opens a native graphical window for the active operating system and runs its
 /// blocking event loop until the window is closed.
-pub fn run<A: PlatformApp>(app: A) -> Result<(), String> {
+#[allow(unused_mut)]
+pub fn run<A: PlatformApp>(mut app: A) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        linux_x11::run(app)
+        let candidate = wayland_candidate(
+            env_var_nonempty("WAYLAND_DISPLAY"),
+            env_var_nonempty("XDG_RUNTIME_DIR"),
+            linux_wayland::library_available(),
+        );
+        let mut wayland_error = None;
+        if candidate {
+            match linux_wayland::run_with(&mut app) {
+                Ok(()) => return Ok(()),
+                Err(linux_wayland::RunError::Runtime(message)) => {
+                    return Err(format!(
+                        "Wayland backend failed after initialization: {message}"
+                    ));
+                }
+                Err(linux_wayland::RunError::Init(message)) => {
+                    wayland_error = Some(message);
+                }
+            }
+        }
+
+        match linux_x11::run(&mut app) {
+            Ok(()) => Ok(()),
+            Err(x11_error) => Err(backend_error_message(wayland_error.as_deref(), &x11_error)),
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -73,13 +183,13 @@ pub fn run<A: PlatformApp>(app: A) -> Result<(), String> {
     {
         let _ = app;
         Err(format!(
-            "Graphical windowing is not supported on target OS '{}'; Droplet currently builds natively on Linux (X11) and Windows (Win32).",
+            "Graphical windowing is not supported on target OS '{}'; Droplet currently builds natively on Linux (Wayland/X11) and Windows (Win32).",
             std::env::consts::OS
         ))
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 pub(crate) fn format_window_title(title: &str) -> String {
     let clean: String = title
         .chars()
@@ -303,5 +413,82 @@ mod tests {
         assert_eq!(app.submits, 1);
         assert_eq!(app.keys, vec![NavKey::NewTab]);
         assert_eq!(app.renders, 1);
+        assert_eq!(app.take_damage(), None);
+        app.set_present_backend("mock");
+    }
+
+    #[test]
+    fn platform_app_damage_hook_supports_partial_damage() {
+        struct DamagedApp(Option<DamageRect>);
+        impl PlatformApp for DamagedApp {
+            fn viewport_size(&self) -> (usize, usize) {
+                (320, 240)
+            }
+            fn url_focused(&self) -> bool {
+                false
+            }
+            fn needs_repaint(&self) -> bool {
+                self.0.is_some()
+            }
+            fn set_needs_repaint(&mut self, dirty: bool) {
+                if !dirty {
+                    self.0 = None;
+                }
+            }
+            fn active_title(&self) -> &str {
+                "Damaged"
+            }
+            fn resize(&mut self, _width: usize, _height: usize) {}
+            fn scroll(&mut self, _delta_y: f32) {}
+            fn handle_mouse_move(&mut self, _x: f32, _y: f32) {}
+            fn handle_mouse_down(&mut self, _x: f32, _y: f32) {}
+            fn handle_mouse_up(&mut self, _x: f32, _y: f32) {}
+            fn handle_text_input(&mut self, _ch: char) {}
+            fn handle_backspace(&mut self) {}
+            fn handle_submit_url(&mut self) {}
+            fn handle_key_navigation(&mut self, _key: NavKey) {}
+            fn render_into(&mut self, _canvas: &mut Canvas) {}
+            fn take_damage(&mut self) -> Option<DamageRect> {
+                self.0.take()
+            }
+        }
+
+        let rect = DamageRect::new(10, 20, 100, 50);
+        let mut app = DamagedApp(Some(rect));
+        assert_eq!(app.take_damage(), Some(rect));
+        assert_eq!(app.take_damage(), None);
+    }
+
+    #[test]
+    fn wayland_candidate_requires_display_runtime_dir_and_library() {
+        for display in [false, true] {
+            for runtime in [false, true] {
+                for library in [false, true] {
+                    let expected = display && runtime && library;
+                    assert_eq!(
+                        wayland_candidate(display, runtime, library),
+                        expected,
+                        "mismatch for ({display}, {runtime}, {library})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn backend_error_message_formats_with_and_without_wayland_reason() {
+        assert_eq!(
+            backend_error_message(None, "no $DISPLAY"),
+            "X11 backend failed (no $DISPLAY)"
+        );
+        assert_eq!(
+            backend_error_message(Some("missing compositor"), "no $DISPLAY"),
+            "Wayland backend unavailable (missing compositor); X11 fallback also failed (no $DISPLAY)"
+        );
+    }
+
+    #[test]
+    fn env_var_nonempty_rejects_unset_variables() {
+        assert!(!env_var_nonempty("DROPLET_NONEXISTENT_WAYLAND_VAR_98765"));
     }
 }

@@ -3,6 +3,9 @@ pub mod adblock;
 mod dns;
 mod pool;
 mod tls;
+#[cfg(target_os = "windows")]
+mod tls_schannel;
+pub mod user_pages;
 
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -124,6 +127,108 @@ pub fn fetch_many_with_filter(
             })
         })
         .collect()
+}
+
+/// Sends a form-style HTTP POST and returns the decoded response.
+///
+/// Redirects follow browser semantics: 301/302/303 switch to GET, while
+/// 307/308 preserve the POST body. Non-network schemes return an error.
+pub fn fetch_post(
+    url: &Url,
+    body: &str,
+    content_type: &str,
+) -> Result<Response, NetError> {
+    fetch_post_with_filter(url, body, content_type, default_filter())
+}
+
+pub fn fetch_post_with_filter(
+    url: &Url,
+    body: &str,
+    content_type: &str,
+    filter: &TrackerFilter,
+) -> Result<Response, NetError> {
+    let (final_url, status, content_type, body_bytes) =
+        fetch_post_raw_with_filter(url, body, content_type, filter)?;
+    let body = String::from_utf8(body_bytes)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    Ok(Response {
+        url: final_url,
+        status,
+        content_type,
+        body,
+    })
+}
+
+fn fetch_post_raw_with_filter(
+    initial_url: &Url,
+    initial_body: &str,
+    initial_content_type: &str,
+    filter: &TrackerFilter,
+) -> Result<(Url, u16, String, Vec<u8>), NetError> {
+    if !matches!(initial_url.scheme, Scheme::Http | Scheme::Https) {
+        return Err(NetError {
+            message: format!(
+                "POST is only supported for HTTP(S) URLs, got '{}'",
+                initial_url.as_str()
+            ),
+        });
+    }
+
+    let mut current_url = initial_url.clone();
+    let mut method = "POST";
+    let mut body = Some(initial_body.to_string());
+    let mut content_type = initial_content_type.to_string();
+
+    for hop in 0..=MAX_REDIRECTS {
+        if filter.should_block(&current_url.host) {
+            return Err(NetError {
+                message: format!("Blocked by tracker filter: {}", current_url.host),
+            });
+        }
+
+        let resp = if method == "POST" {
+            pool::send_http_post(
+                &current_url,
+                body.as_deref().unwrap_or(""),
+                &content_type,
+            )?
+        } else {
+            pool::send_http_get(&current_url)?
+        };
+
+        if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
+            if let Some(loc) = resp.location {
+                if hop == MAX_REDIRECTS {
+                    return Err(NetError {
+                        message: format!("Too many HTTP redirects (max {MAX_REDIRECTS})"),
+                    });
+                }
+                current_url = current_url.resolve(&loc).map_err(|err| NetError {
+                    message: format!("Invalid redirect target '{loc}': {err}"),
+                })?;
+                if !matches!(current_url.scheme, Scheme::Http | Scheme::Https) {
+                    return Err(NetError {
+                        message: format!(
+                            "Refusing HTTP redirect to non-network URL: {}",
+                            current_url.as_str()
+                        ),
+                    });
+                }
+                if matches!(resp.status, 301..=303) {
+                    method = "GET";
+                    body = None;
+                    content_type.clear();
+                }
+                continue;
+            }
+        }
+
+        return Ok((current_url, resp.status, resp.content_type, resp.body));
+    }
+
+    Err(NetError {
+        message: format!("Too many HTTP redirects (max {MAX_REDIRECTS})"),
+    })
 }
 
 pub fn fetch_bytes(url: &Url) -> Result<(String, Vec<u8>), NetError> {
@@ -712,6 +817,71 @@ mod tests {
 
         let redir_err = fetch_with_filter(&redir_url, &custom).unwrap_err();
         assert!(redir_err.message.contains("Blocked by tracker filter"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_post_sends_url_encoded_body_and_follows_303_to_get() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/submit")).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 1024];
+            let header_end = loop {
+                let n = sock.read(&mut buf).unwrap();
+                assert!(n > 0);
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&raw[..header_end]).to_string();
+            assert!(head.starts_with("POST /submit HTTP/1.1\r\n"));
+            let cl: usize = head
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.trim().eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse().ok())
+                        .flatten()
+                })
+                .expect("Content-Length");
+            while raw.len() < header_end + cl {
+                let n = sock.read(&mut buf).unwrap();
+                assert!(n > 0);
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let body = String::from_utf8_lossy(&raw[header_end..header_end + cl]).to_string();
+            assert_eq!(body, "user=%D0%98%D0%B2%D0%B0%D0%BD&ok=1");
+            sock.write_all(
+                b"HTTP/1.1 303 See Other\r\nLocation: /done\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+
+            let (mut sock2, _) = listener.accept().unwrap();
+            let req2 = read_http_request_head(&mut sock2);
+            assert!(req2.starts_with("GET /done HTTP/1.1\r\n"));
+            let resp_body = "<html><body>OK</body></html>";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                resp_body.len(),
+                resp_body
+            );
+            sock2.write_all(resp.as_bytes()).unwrap();
+        });
+
+        let resp = fetch_post(
+            &url,
+            "user=%D0%98%D0%B2%D0%B0%D0%BD&ok=1",
+            "application/x-www-form-urlencoded",
+        )
+        .unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(resp.url.as_str().ends_with("/done"));
+        assert!(resp.body.contains("OK"));
         server.join().unwrap();
     }
 }

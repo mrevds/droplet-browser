@@ -19,3 +19,5 @@ droplet-layout = { path = "../../crates/droplet-layout" }
 droplet-paint = { path = "../../crates/droplet-paint" }
 droplet-platform = { path = "../../crates/droplet-platform" }
 droplet-shell = { path = "../../crates/droplet-shell" }
+droplet-ipc = { path = "../../crates/droplet-ipc" }
+droplet-sandbox = { path = "../../crates/droplet-sandbox" }

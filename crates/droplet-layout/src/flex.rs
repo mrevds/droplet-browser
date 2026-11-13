@@ -9,6 +9,7 @@ use crate::box_model::{
     fixed_horizontal_margins, resolve_height, resolve_max_width, resolve_width, shift_layout_box,
     BoxType, Dimensions, LayoutBox, LayoutCtx,
 };
+use crate::forms;
 use crate::inline::{layout_inline_sequence, measure_intrinsic_content_width};
 use crate::replaced::{is_img_element, resolve_image_content_size};
 
@@ -138,10 +139,11 @@ fn collect_flex_items<'a>(
         );
         let s = child.style;
         let (ml, mr) = fixed_horizontal_margins(s);
+        let control_extra = forms::control_extra_horizontal(ctx.doc, child);
 
         let (main_pad_border, main_margin, cross_pad_border, cross_margin) = if params.is_row {
             (
-                s.padding.left + s.padding.right + s.border.left + s.border.right,
+                control_extra,
                 ml + mr,
                 s.padding.top + s.padding.bottom + s.border.top + s.border.bottom,
                 s.margin.top + s.margin.bottom,
@@ -150,7 +152,7 @@ fn collect_flex_items<'a>(
             (
                 s.padding.top + s.padding.bottom + s.border.top + s.border.bottom,
                 s.margin.top + s.margin.bottom,
-                s.padding.left + s.padding.right + s.border.left + s.border.right,
+                control_extra,
                 ml + mr,
             )
         };

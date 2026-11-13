@@ -1,9 +1,9 @@
 # DROP-011b: Windows Schannel TLS, macOS Cocoa Slot & JPEG Conformance
 
 - **Phase:** 9
-- **Status:** `in-progress`
+- **Status:** `done`
 - **Blocked By:** `DROP-003`, `DROP-004` (both `done`)
-- **Implementation owner:** DeepSeek V4.1 Flash Free (OpenCode agent)
+- **Implementation owner:** Swarm Wave 1 (`winmac-jpeg`)
 
 ---
 

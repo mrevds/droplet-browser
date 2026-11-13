@@ -6,6 +6,6 @@ pub mod geometry;
 
 pub use droplet_font as font;
 pub use droplet_image as image;
-pub use canvas::{draw_line_aa, Canvas};
+pub use canvas::{draw_line_aa, Canvas, PixelBuffer};
 pub use color::Color;
-pub use geometry::Rect;
+pub use geometry::{DamageRect, Rect};

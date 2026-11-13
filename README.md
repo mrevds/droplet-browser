@@ -1,53 +1,57 @@
 # Droplet Browser
 
-**Droplet** is a fast, zero-bloat, multi-tab graphical web browser engine written from scratch in Rust (`edition = "2021"`) for **Linux (X11/Wayland)**, **Windows (Win32)**, and headless CLI.  
-It is a Cargo workspace of small engine crates with **zero external crate dependencies**—pure Rust `std` plus runtime OS dynamic loading (`libX11.so.6` / `libwayland-client.so.0` / `libssl.so` on Linux, Win32 `StretchDIBits` + Schannel on Windows, and a native Cocoa slot for macOS).
+**Droplet** is a fast, zero-bloat, multi-tab graphical web browser engine written from scratch in Rust (`edition = "2021"`) for **Linux (Wayland/X11)**, **Windows (Win32)**, **macOS (Cocoa)**, and headless CLI.  
+It is a Cargo workspace of focused engine crates with **zero external crate dependencies**—pure Rust `std` plus runtime OS dynamic loading (`libwayland-client.so.0` / `libX11.so.6` / `libXext.so.6` / `libssl.so` on Linux, Win32 GDI `DIBSection` + Schannel on Windows, and Objective-C/CoreGraphics FFI on macOS).
 
 ---
 
 ## Features
 
 - **HTTPS, Keep-Alive & Built-In Tracker Blocker:**
-  - `https://` on Linux via runtime `dlopen` OpenSSL (`libssl.so.4` / `libssl.so.3` / `libssl.so`) with system CA verification and SNI, alongside `http://`, `file://`, `data:`, and `about:*`.
+  - `https://` on **Linux** via runtime `dlopen` OpenSSL (`libssl.so.4` / `libssl.so.3` / `libssl.so`) and on **Windows** via native Win32 **Schannel** (`secur32.dll` / `crypt32.dll`) with system CA verification and SNI, alongside `http://`, `file://`, `data:`, and `about:*`.
   - HTTP/1.1 `Keep-Alive` connection pool, in-memory DNS TTL cache, and bounded 4-thread concurrent loader for external `<link rel="stylesheet">` stylesheets and images.
   - Zero-allocation domain/suffix **Tracker Filter** (`crates/droplet-net/src/adblock.rs`) blocking ad/telemetry hosts before DNS or TCP connect.
-- **Modern Layout & Interactive CSS:**
+- **Modern Layout, Forms & Interactive CSS:**
   - Two-pass **Flexbox** (`display: flex`, `flex-direction`, `flex-wrap`, `justify-content`, `align-items`, `gap`, `flex-grow`/`flex-shrink`/`flex-basis`) and `display: inline-block`.
-  - Relative units (`%`, `em`, `rem`, `vh`, `vw`), rounded rectangles (`border-radius`), and `:hover` / `:active` pseudo-classes (with zero mouse-move overhead when a page uses no interactive rules).
+  - Relative units (`%`, `em`, `rem`, `vh`, `vw`), rounded rectangles (`border-radius`), `:hover` / `:active` pseudo-classes, and HTML form controls (`<input>`, `<textarea>`, `<button>`, `<select>`) with `Tab`/`Shift+Tab` focus, caret editing, text selection, and clipboard integration.
+- **Embedded JavaScript VM & Reactive DOM:**
+  - Pure-Rust bytecode VM (`crates/droplet-js`) with `DomHost` bindings (`document.getElementById`, `querySelector`, `querySelectorAll`, `addEventListener`, `textContent`, `innerHTML`, `classList`, `style`, timers), event bubbling (`preventDefault` / `stopPropagation`), and `DirtyFlags` incremental style/layout/display-list updates.
 - **Anti-Aliased TrueType Fonts & Image Decoding:**
-  - Automatic system TrueType font discovery on Linux (`/usr/share/fonts/...`) and Windows (`C:\Windows\Fonts\...`) with a pure-Rust `sfnt`/`glyf` AA scanline rasterizer, bounded `GlyphAtlas` cache (`4096` entries), and `8x16` ASCII + Cyrillic bitmap fallback.
-  - Pure-Rust **PNG, baseline JPEG, BMP, PPM (`P3`/`P6`), and static SVG** image decoder (`crates/droplet-image/src/lib.rs`) with a 64M-pixel bomb guard and `<img>` replaced layout boxes (`alt`-text fallback on error).
-- **Minimalist Multi-Tab UI & Low-RAM Design:**
-  - Clean `30px` tab strip + `44px` toolbar + floating bottom-left hover URL pill (`STATUS_BAR_HEIGHT = 0`).
-  - Automatic **Tab Hibernation** beyond 3 warm tabs (`MAX_WARM_TABS = 3`), Arena DOM (`Vec<Node>`), flat `Vec` DOM attributes, and `Copy` `ComputedStyle` (zero `HashMap` per element).
-- **Cross-Platform Windowing (`crates/droplet-platform/src/`):**
-  - **Linux:** X11 via runtime `dlopen("libX11.so.6")` (`crates/droplet-platform/src/linux_x11.rs`).
-  - **Windows:** Win32 windowing + `StretchDIBits` (`crates/droplet-platform/src/windows.rs`).
-  - **macOS:** native Cocoa slot (`crates/droplet-platform/src/macos.rs`, requires a macOS host with the Apple SDK).
+  - System TrueType font discovery on Linux (`/usr/share/fonts/...`) and Windows (`C:\Windows\Fonts\...`) with a pure-Rust `sfnt`/`glyf` AA scanline rasterizer, bounded `GlyphAtlas` (`4096` entries), and `8x16` ASCII + Cyrillic bitmap fallback.
+  - Pure-Rust **PNG, baseline JPEG, BMP, PPM (`P3`/`P6`), and static SVG** image decoder (`crates/droplet-image`) with a 64M-pixel bomb guard and `<img>` replaced layout boxes (`alt`-text fallback on error).
+- **Daily-Driver UI, Persistence & Low-RAM Design:**
+  - Minimalist `30px` tab strip + `44px` toolbar + floating hover URL pill (`STATUS_BAR_HEIGHT = 0`), persistent bookmarks & history (`crates/droplet-storage`, `about:history`, `about:bookmarks`) with URL autocomplete, Find-in-Page (`Ctrl+F`), and Box Model Inspector (`Ctrl+Shift+I`).
+  - Automatic **Tab Hibernation** beyond 3 warm tabs (`MAX_WARM_TABS = 3`), Arena DOM (`Vec<Node>`), flat `Vec` attributes, and `Copy` `ComputedStyle` (zero `HashMap` per element).
+- **Zero-Copy Windowing & Multi-Process Sandbox (`crates/droplet-platform/`, `crates/droplet-sandbox/`, `crates/droplet-ipc/`):**
+  - **Linux:** native **Wayland** (`wl_shm` + `xdg-shell` with `wl_surface.damage_buffer`, falling back automatically to **X11** `MIT-SHM` / `XPutImage`).
+  - **Windows:** Win32 `CreateWindowExW` with persistent `DIBSection` direct rendering + `DamageRect` `BitBlt` (`StretchDIBits` fallback).
+  - **macOS:** Cocoa/AppKit `NSView` + `CGContextClipToRect` dirty-rect presentation (verified via cross-compilation for `aarch64-apple-darwin`).
+  - **Sandboxed Renderer Worker (`--sandbox-screenshot` / `--renderer`):** privileged `RendererHost` pre-fetches resources over `droplet-net` and communicates with an isolated `HeadlessRenderer` worker over framed `DRIP` IPC + `memfd`/Win32 shared memory (`droplet-ipc`) under `droplet-sandbox` (Linux `seccomp-bpf` + best-effort user/net namespaces + `rlimit`; Windows Job Objects + Restricted Token; macOS `sandbox_init`).
 
 ---
 
 ## Repository Layout
 
 ```text
-apps/droplet-desktop/     CLI entry point + headless dump/screenshot modes
+apps/droplet-desktop/     CLI entry point, headless modes & multi-process RendererHost / --renderer
 crates/droplet-url/       URL parser and resolver
-crates/droplet-net/       HTTP/HTTPS, DNS cache, keep-alive pool, tracker filter, about:* pages
-crates/droplet-dom/       Arena DOM + iterative HTML parser
+crates/droplet-net/       HTTP/HTTPS (OpenSSL/Schannel), DNS cache, keep-alive pool, tracker filter, about:* pages
+crates/droplet-dom/       Arena DOM, iterative HTML parser, mutation & CSS selector queries
+crates/droplet-js/        Pure-Rust ES-subset lexer, compiler, stack bytecode VM & DomHost bridge
+crates/droplet-ipc/       Shared-memory framebuffer (memfd/Win32) and framed DRIP IPC protocol
+crates/droplet-sandbox/   OS process isolation (Linux seccomp-bpf/namespaces, Win32 Job/Token, macOS sandbox)
 crates/droplet-style/     CSS parser, cascade, Copy ComputedStyle
-crates/droplet-layout/    Block/inline/flex layout, hit testing
-crates/droplet-gfx/       Canvas, colors, geometry, shared font/image types
+crates/droplet-layout/    Block/inline/flex/form layout, hit testing
+crates/droplet-gfx/       Canvas (owned & external-slice buffers), colors, DamageRect geometry
 crates/droplet-font/      TrueType discovery, sfnt/glyf rasterizer, glyph atlas
-crates/droplet-image/     PNG/JPEG/BMP/PPM/SVG decoders
-crates/droplet-paint/     Flat display list, chrome and overlays
-crates/droplet-platform/  X11/Wayland/Win32/macOS windowing backends
-crates/droplet-shell/     Multi-tab browser session, loader and interaction state
+crates/droplet-image/     PNG, baseline JPEG, BMP, PPM, and static SVG decoders
+crates/droplet-paint/     Flat display list, chrome, find/inspector/form overlays
+crates/droplet-platform/  Wayland, X11, Win32, macOS windowing & clipboard backends
+crates/droplet-storage/   Persistent binary/flat-file history, bookmarks & URL autocomplete store
+crates/droplet-shell/     Multi-tab browser session, loader, forms, find, JS DOM host & zero-IO HeadlessRenderer
 ```
 
-The old monolithic `src/` tree is kept only as a historical reference; the
-workspace above is the canonical build. `Cargo.toml` is a virtual workspace, so
-`cargo test` / `cargo clippy` operate on every crate, while `cargo run -- ...`
-runs the `droplet-desktop` binary.
+`Cargo.toml` is a virtual workspace covering all crates above plus `apps/droplet-desktop`.
 
 ---
 
@@ -55,15 +59,15 @@ runs the `droplet-desktop` binary.
 
 ### Prerequisites
 - Rust toolchain (`/home/mrevds/.cargo/bin/cargo` / `rustc`)
-- **Linux GUI:** X11 (`libX11.so.6`); `libssl.so.4`/`.3`/`.so` for `https://`
-- **Windows GUI:** Win32 (`user32.dll`, `gdi32.dll`)
+- **Linux GUI:** Wayland (`libwayland-client.so.0`) or X11 (`libX11.so.6`, optional `libXext.so.6` for `MIT-SHM`); `libssl.so.4`/`.3`/`.so` for `https://`
+- **Windows GUI:** Win32 (`user32.dll`, `gdi32.dll`, `secur32.dll`, `crypt32.dll`)
 - Headless CLI modes (`--dump-dom`, `--dump-layout`, `--screenshot`) run without any display server.
 
 ### Build & Test
 
 ```bash
-/home/mrevds/.cargo/bin/cargo test
-/home/mrevds/.cargo/bin/cargo clippy --all-targets
+/home/mrevds/.cargo/bin/cargo test --workspace
+/home/mrevds/.cargo/bin/cargo clippy --workspace --all-targets -- -D warnings
 /home/mrevds/.cargo/bin/cargo build --release
 ```
 
@@ -91,6 +95,9 @@ runs the `droplet-desktop` binary.
 
 # Render a full frame (tabs + toolbar + page) to a binary PPM image
 /home/mrevds/.cargo/bin/cargo run -- --screenshot /tmp/out.ppm about:droplet
+
+# Render inside the sandboxed --renderer child process and write a PPM image
+/home/mrevds/.cargo/bin/cargo run -- --sandbox-screenshot /tmp/sandbox.ppm about:droplet
 ```
 
 ### Built-in `about:*` Pages
@@ -98,6 +105,8 @@ runs the `droplet-desktop` binary.
 - `about:roadmap` — Phased development plan
 - `about:architecture` — Rendering pipeline & Arena DOM overview
 - `about:test` — Box Model, Flexbox, Cyrillic/ASCII typography, links, lists & `<pre><code>` visual test page
+- `about:history` — Browsing history view & clear/remove actions
+- `about:bookmarks` — Saved bookmarks view & remove action
 - `about:blank` — Empty page
 
 ---
@@ -106,17 +115,18 @@ runs the `droplet-desktop` binary.
 
 | Input | Action |
 | --- | --- |
-| **Left Click** | Activate `<a href>` links, switch/close tabs, click `+` new tab, or toolbar buttons (`<`, `>`, `R`, Home, address bar) |
+| **Left Click** | Activate `<a href>` links, interact with form controls, switch/close tabs, click `+` new tab, or toolbar buttons |
 | **Mouse Wheel** | Scroll page up / down |
 | **Mouse Buttons 8 / 9** | History Back / Forward |
-| `Ctrl+T` | Open a new tab |
-| `Ctrl+W` | Close active tab |
-| `Ctrl+Tab` | Cycle to next tab |
-| `Ctrl+L` | Focus address bar |
-| `Enter` | Navigate to address bar URL (when focused) |
-| `Esc` | Unfocus address bar |
+| `Ctrl+T` / `Ctrl+W` | Open a new tab / Close active tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+1..9` | Cycle next/prev tab or jump directly to tab 1–9 |
+| `Ctrl+L` / `Enter` / `Esc` | Focus address bar / Navigate (or accept autocomplete) / Unfocus or dismiss bar |
+| `Ctrl+D` | Bookmark / unbookmark current page |
+| `Ctrl+F` (`Enter` / `Shift+Enter`) | Open Find-in-Page (`Next` / `Previous` match) |
+| `Ctrl+Shift+I` | Toggle Box Model Inspector overlay |
+| `Ctrl+A` / `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Select all / Copy / Cut / Paste |
 | `Ctrl+R` or `F5` | Reload current page |
-| `Alt+Left` / `Alt+Right` | History Back / Forward |
+| `Alt+Left` / `Alt+Right` / `Alt+Home` | History Back / Forward / Go Home (`about:droplet`) |
 | `Up` / `Down` / `PageUp` / `PageDown` / `Home` / `End` / `Space` | Scroll page |
 
 ---

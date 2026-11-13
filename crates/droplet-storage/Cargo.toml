@@ -1,0 +1,7 @@
+[package]
+name = "droplet-storage"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-dependency persistent history and bookmark store for Droplet"
+
+[dependencies]

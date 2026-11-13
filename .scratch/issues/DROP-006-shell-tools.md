@@ -1,9 +1,9 @@
 # DROP-006: Persistent History/Bookmarks, Find-in-Page & Box-Model DevTools
 
 - **Phase:** 6
-- **Status:** `in-progress`
+- **Status:** `done`
 - **Blocked By:** `DROP-002`, `DROP-004` (both `done`)
-- **Implementation owner:** DeepSeek V4.1 Flash Free (OpenCode agent)
+- **Implementation owner:** Swarm Wave 1 (`tools`)
 
 ---
 

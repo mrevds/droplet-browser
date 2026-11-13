@@ -4,18 +4,33 @@ use std::ffi::c_void;
 use std::mem;
 use std::ptr;
 
-use droplet_gfx::{Canvas, Color};
+use droplet_gfx::{Canvas, Color, DamageRect};
 
-use crate::{decode_utf16_unit, format_window_title, to_wide_null, NavKey, PlatformApp};
+use crate::{
+    decode_utf16_unit, format_window_title, to_wide_null, CaretMove, NavKey, PlatformApp,
+};
 
+#[allow(clippy::upper_case_acronyms)]
 type HWND = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
 type HINSTANCE = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
 type HMODULE = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
 type HICON = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
 type HCURSOR = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
 type HBRUSH = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
 type HMENU = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
 type HDC = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
+type HBITMAP = *mut c_void;
+#[allow(clippy::upper_case_acronyms)]
+type HGDIOBJ = *mut c_void;
+const HGDI_ERROR: HGDIOBJ = usize::MAX as HGDIOBJ;
 type WndProc = unsafe extern "system" fn(HWND, u32, usize, isize) -> isize;
 
 // Class and window styles
@@ -80,15 +95,27 @@ const VK_LEFT: usize = 0x25;
 const VK_UP: usize = 0x26;
 const VK_RIGHT: usize = 0x27;
 const VK_DOWN: usize = 0x28;
+const VK_DELETE: usize = 0x2E;
+const VK_DIGIT_1: usize = 0x31;
+const VK_DIGIT_9: usize = 0x39;
+const VK_A: usize = 0x41;
+const VK_C: usize = 0x43;
+const VK_D: usize = 0x44;
+const VK_F: usize = 0x46;
+const VK_I: usize = 0x49;
 const VK_L: usize = 0x4C;
 const VK_R: usize = 0x52;
 const VK_T: usize = 0x54;
+const VK_V: usize = 0x56;
 const VK_W: usize = 0x57;
+const VK_X: usize = 0x58;
+const VK_F3: usize = 0x72;
 const VK_F5: usize = 0x74;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 #[allow(dead_code)]
+#[allow(clippy::upper_case_acronyms)]
 struct POINT {
     x: i32,
     y: i32,
@@ -96,6 +123,7 @@ struct POINT {
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
+#[allow(clippy::upper_case_acronyms)]
 struct RECT {
     left: i32,
     top: i32,
@@ -105,6 +133,7 @@ struct RECT {
 
 #[repr(C)]
 #[allow(dead_code)]
+#[allow(clippy::upper_case_acronyms)]
 struct WNDCLASSEXW {
     cb_size: u32,
     style: u32,
@@ -122,6 +151,7 @@ struct WNDCLASSEXW {
 
 #[repr(C)]
 #[allow(dead_code)]
+#[allow(clippy::upper_case_acronyms)]
 struct MSG {
     hwnd: HWND,
     message: u32,
@@ -133,6 +163,7 @@ struct MSG {
 
 #[repr(C)]
 #[allow(dead_code)]
+#[allow(clippy::upper_case_acronyms)]
 struct PAINTSTRUCT {
     hdc: HDC,
     f_erase: i32,
@@ -144,6 +175,7 @@ struct PAINTSTRUCT {
 
 #[repr(C)]
 #[allow(dead_code)]
+#[allow(clippy::upper_case_acronyms)]
 struct BITMAPINFOHEADER {
     bi_size: u32,
     bi_width: i32,
@@ -160,6 +192,7 @@ struct BITMAPINFOHEADER {
 
 #[repr(C)]
 #[allow(dead_code)]
+#[allow(clippy::upper_case_acronyms)]
 struct RGBQUAD {
     rgb_blue: u8,
     rgb_green: u8,
@@ -169,6 +202,7 @@ struct RGBQUAD {
 
 #[repr(C)]
 #[allow(dead_code)]
+#[allow(clippy::upper_case_acronyms)]
 struct BITMAPINFO {
     bmi_header: BITMAPINFOHEADER,
     bmi_colors: [RGBQUAD; 1],
@@ -176,6 +210,7 @@ struct BITMAPINFO {
 
 #[repr(C)]
 #[allow(dead_code)]
+#[allow(clippy::upper_case_acronyms)]
 struct CREATESTRUCTW {
     lp_create_params: *mut c_void,
     h_instance: HINSTANCE,
@@ -262,6 +297,29 @@ extern "system" {
 
 #[link(name = "gdi32")]
 extern "system" {
+    fn CreateCompatibleDC(hdc: HDC) -> HDC;
+    fn DeleteDC(hdc: HDC) -> i32;
+    fn SelectObject(hdc: HDC, h: HGDIOBJ) -> HGDIOBJ;
+    fn DeleteObject(ho: HGDIOBJ) -> i32;
+    fn CreateDIBSection(
+        hdc: HDC,
+        pbmi: *const BITMAPINFO,
+        usage: u32,
+        ppv_bits: *mut *mut c_void,
+        h_section: *mut c_void,
+        offset: u32,
+    ) -> HBITMAP;
+    fn BitBlt(
+        hdc: HDC,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        hdc_src: HDC,
+        x1: i32,
+        y1: i32,
+        rop: u32,
+    ) -> i32;
     fn StretchDIBits(
         hdc: HDC,
         x_dest: i32,
@@ -279,33 +337,31 @@ extern "system" {
     ) -> i32;
 }
 
-struct WinState<A: PlatformApp> {
-    app: A,
-    canvas: Canvas,
-    last_title: String,
-    hwnd: HWND,
-    pending_surrogate: Option<u16>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlitRect {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
 }
 
-unsafe fn present_canvas(hdc: HDC, canvas: &Canvas) {
-    if canvas.width == 0 || canvas.height == 0 {
-        return;
+fn top_down_bitmap_info(width: usize, height: usize) -> Option<BITMAPINFO> {
+    if width == 0 || height == 0 {
+        return None;
     }
-    if canvas.width > i32::MAX as usize || canvas.height > i32::MAX as usize {
-        return;
+    if width > i32::MAX as usize || height > i32::MAX as usize {
+        return None;
     }
-    if canvas.pixels.len() < canvas.width.saturating_mul(canvas.height) {
-        return;
+    let byte_len = width.checked_mul(height)?.checked_mul(4)?;
+    if byte_len > u32::MAX as usize {
+        return None;
     }
-
-    let w = canvas.width as i32;
-    let h = canvas.height as i32;
-    let bmi = BITMAPINFO {
+    Some(BITMAPINFO {
         bmi_header: BITMAPINFOHEADER {
             bi_size: mem::size_of::<BITMAPINFOHEADER>() as u32,
-            bi_width: w,
+            bi_width: width as i32,
             // Negative height selects a top-down 32-bit BI_RGB DIB matching 0x00RRGGBB pixels.
-            bi_height: -h,
+            bi_height: -(height as i32),
             bi_planes: 1,
             bi_bit_count: 32,
             bi_compression: BI_RGB,
@@ -321,8 +377,260 @@ unsafe fn present_canvas(hdc: HDC, canvas: &Canvas) {
             rgb_red: 0,
             rgb_reserved: 0,
         }],
-    };
+    })
+}
 
+fn clamp_rect_to_viewport(
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    vp_width: usize,
+    vp_height: usize,
+) -> Option<BlitRect> {
+    if width == 0 || height == 0 || vp_width == 0 || vp_height == 0 {
+        return None;
+    }
+    let x1 = x.min(vp_width);
+    let y1 = y.min(vp_height);
+    let x2 = x.saturating_add(width).min(vp_width);
+    let y2 = y.saturating_add(height).min(vp_height);
+    if x2 <= x1 || y2 <= y1 || x2 > i32::MAX as usize || y2 > i32::MAX as usize {
+        return None;
+    }
+    Some(BlitRect {
+        x: x1,
+        y: y1,
+        width: x2 - x1,
+        height: y2 - y1,
+    })
+}
+
+fn rect_from_paint_rect(rc: &RECT, vp_width: usize, vp_height: usize) -> Option<BlitRect> {
+    if rc.right <= rc.left || rc.bottom <= rc.top {
+        return None;
+    }
+    let left = rc.left.max(0) as usize;
+    let top = rc.top.max(0) as usize;
+    let right = rc.right.max(0) as usize;
+    let bottom = rc.bottom.max(0) as usize;
+    clamp_rect_to_viewport(
+        left,
+        top,
+        right.saturating_sub(left),
+        bottom.saturating_sub(top),
+        vp_width,
+        vp_height,
+    )
+}
+
+fn union_blit_rects(a: Option<BlitRect>, b: Option<BlitRect>) -> Option<BlitRect> {
+    match (a, b) {
+        (Some(ra), Some(rb)) => {
+            let x1 = ra.x.min(rb.x);
+            let y1 = ra.y.min(rb.y);
+            let x2 = ra
+                .x
+                .saturating_add(ra.width)
+                .max(rb.x.saturating_add(rb.width));
+            let y2 = ra
+                .y
+                .saturating_add(ra.height)
+                .max(rb.y.saturating_add(rb.height));
+            Some(BlitRect {
+                x: x1,
+                y: y1,
+                width: x2.saturating_sub(x1),
+                height: y2.saturating_sub(y1),
+            })
+        }
+        (Some(r), None) | (None, Some(r)) => Some(r),
+        (None, None) => None,
+    }
+}
+
+/// Persistent top-down 32bpp GDI DIBSection paired with a compatible memory DC
+/// so software rendering can write straight into GDI-backed memory and present
+/// only the damaged sub-rect via `BitBlt`.
+struct DibSurface {
+    mem_dc: HDC,
+    bitmap: HBITMAP,
+    old_bitmap: HGDIOBJ,
+    bits: *mut u32,
+    width: usize,
+    height: usize,
+    len: usize,
+}
+
+impl DibSurface {
+    unsafe fn create(screen_dc: HDC, width: usize, height: usize) -> Option<Self> {
+        let bmi = top_down_bitmap_info(width, height)?;
+        let len = width.checked_mul(height)?;
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        if mem_dc.is_null() {
+            return None;
+        }
+        let mut raw_bits: *mut c_void = ptr::null_mut();
+        let bitmap = CreateDIBSection(
+            mem_dc,
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut raw_bits,
+            ptr::null_mut(),
+            0,
+        );
+        if bitmap.is_null()
+            || raw_bits.is_null()
+            || !(raw_bits as usize).is_multiple_of(mem::align_of::<u32>())
+        {
+            if !bitmap.is_null() {
+                DeleteObject(bitmap);
+            }
+            DeleteDC(mem_dc);
+            return None;
+        }
+        let old_bitmap = SelectObject(mem_dc, bitmap);
+        if old_bitmap.is_null() || old_bitmap == HGDI_ERROR {
+            DeleteObject(bitmap);
+            DeleteDC(mem_dc);
+            return None;
+        }
+        Some(Self {
+            mem_dc,
+            bitmap,
+            old_bitmap,
+            bits: raw_bits.cast::<u32>(),
+            width,
+            height,
+            len,
+        })
+    }
+
+    fn matches(&self, width: usize, height: usize) -> bool {
+        self.width == width && self.height == height && !self.bits.is_null()
+    }
+
+    fn pixels_mut(&mut self) -> Option<&mut [u32]> {
+        if self.bits.is_null() || self.len == 0 {
+            return None;
+        }
+        Some(unsafe { std::slice::from_raw_parts_mut(self.bits, self.len) })
+    }
+
+    unsafe fn blit_rect(&self, dest_dc: HDC, rect: BlitRect) -> bool {
+        let Some(clamped) = clamp_rect_to_viewport(
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            self.width,
+            self.height,
+        ) else {
+            return false;
+        };
+        BitBlt(
+            dest_dc,
+            clamped.x as i32,
+            clamped.y as i32,
+            clamped.width as i32,
+            clamped.height as i32,
+            self.mem_dc,
+            clamped.x as i32,
+            clamped.y as i32,
+            SRCCOPY,
+        ) != 0
+    }
+
+    unsafe fn destroy(&mut self) {
+        if !self.mem_dc.is_null() {
+            if !self.old_bitmap.is_null() && self.old_bitmap != HGDI_ERROR {
+                SelectObject(self.mem_dc, self.old_bitmap);
+                self.old_bitmap = ptr::null_mut();
+            }
+            if !self.bitmap.is_null() {
+                DeleteObject(self.bitmap);
+                self.bitmap = ptr::null_mut();
+            }
+            DeleteDC(self.mem_dc);
+            self.mem_dc = ptr::null_mut();
+        } else if !self.bitmap.is_null() {
+            DeleteObject(self.bitmap);
+            self.bitmap = ptr::null_mut();
+        }
+        self.bits = ptr::null_mut();
+        self.width = 0;
+        self.height = 0;
+        self.len = 0;
+    }
+}
+
+impl Drop for DibSurface {
+    fn drop(&mut self) {
+        unsafe {
+            self.destroy();
+        }
+    }
+}
+
+struct WinState<A: PlatformApp> {
+    app: A,
+    canvas: Canvas,
+    dib_surface: Option<DibSurface>,
+    pending_damage: Option<DamageRect>,
+    pending_full_repaint: bool,
+    present_backend: Option<&'static str>,
+    last_title: String,
+    hwnd: HWND,
+    pending_surrogate: Option<u16>,
+}
+
+fn report_present_backend<A: PlatformApp>(
+    app: &mut A,
+    active_backend: &mut Option<&'static str>,
+    backend: &'static str,
+) {
+    if *active_backend != Some(backend) {
+        *active_backend = Some(backend);
+        app.set_present_backend(backend);
+    }
+}
+
+fn merge_damage(a: Option<DamageRect>, b: Option<DamageRect>) -> Option<DamageRect> {
+    match (a, b) {
+        (Some(da), Some(db)) => Some(da.union(db)),
+        (Some(d), None) | (None, Some(d)) => Some(d),
+        (None, None) => None,
+    }
+}
+
+fn damage_to_blit_rect(damage: DamageRect, vp_width: usize, vp_height: usize) -> Option<BlitRect> {
+    let clamped = damage.clamp(vp_width, vp_height);
+    if clamped.is_empty() {
+        return None;
+    }
+    clamp_rect_to_viewport(
+        clamped.x,
+        clamped.y,
+        clamped.width,
+        clamped.height,
+        vp_width,
+        vp_height,
+    )
+}
+
+unsafe fn present_canvas(hdc: HDC, canvas: &Canvas) {
+    let Some(bmi) = top_down_bitmap_info(canvas.width, canvas.height) else {
+        return;
+    };
+    let Some(pixel_count) = canvas.width.checked_mul(canvas.height) else {
+        return;
+    };
+    if canvas.pixels.len() < pixel_count {
+        return;
+    }
+
+    let w = canvas.width as i32;
+    let h = canvas.height as i32;
     StretchDIBits(
         hdc,
         0,
@@ -349,6 +657,22 @@ fn handle_key_down<A: PlatformApp>(
 ) -> bool {
     if ctrl && !alt {
         match vk {
+            VK_A => {
+                app.handle_select_all();
+                return true;
+            }
+            VK_C => {
+                app.handle_copy();
+                return true;
+            }
+            VK_X => {
+                app.handle_cut();
+                return true;
+            }
+            VK_V => {
+                app.handle_paste();
+                return true;
+            }
             VK_L => {
                 app.handle_key_navigation(NavKey::FocusUrl);
                 return true;
@@ -363,6 +687,22 @@ fn handle_key_down<A: PlatformApp>(
             }
             VK_R => {
                 app.handle_key_navigation(NavKey::Reload);
+                return true;
+            }
+            VK_I if shift => {
+                app.handle_key_navigation(NavKey::ToggleInspector);
+                return true;
+            }
+            VK_D => {
+                app.handle_key_navigation(NavKey::ToggleBookmark);
+                return true;
+            }
+            VK_F => {
+                app.handle_key_navigation(NavKey::Find);
+                return true;
+            }
+            VK_DIGIT_1..=VK_DIGIT_9 => {
+                app.handle_key_navigation(NavKey::SwitchTab(vk - VK_DIGIT_1));
                 return true;
             }
             VK_TAB => {
@@ -396,30 +736,68 @@ fn handle_key_down<A: PlatformApp>(
     }
 
     match vk {
+        VK_F3 => {
+            if shift {
+                app.handle_key_navigation(NavKey::FindPrev);
+            } else {
+                app.handle_key_navigation(NavKey::FindNext);
+            }
+            true
+        }
         VK_F5 => {
             app.handle_key_navigation(NavKey::Reload);
             true
         }
         VK_RETURN => {
-            if app.url_focused() {
-                app.handle_submit_url();
-            }
+            app.handle_enter(shift);
             true
         }
         VK_BACK => {
             app.handle_backspace();
             true
         }
+        VK_DELETE => {
+            app.handle_delete();
+            true
+        }
         VK_ESCAPE => {
             app.handle_key_navigation(NavKey::Escape);
             true
         }
+        VK_TAB => {
+            if !shift && app.url_focused() {
+                app.handle_key_navigation(NavKey::AcceptCompletion);
+            } else {
+                app.handle_tab_focus(shift);
+            }
+            true
+        }
+        VK_LEFT => {
+            app.handle_caret(CaretMove::Left, shift);
+            true
+        }
+        VK_RIGHT => {
+            if app.url_focused() {
+                app.handle_key_navigation(NavKey::AcceptCompletion);
+            } else {
+                app.handle_caret(CaretMove::Right, shift);
+            }
+            true
+        }
         VK_UP => {
-            app.handle_key_navigation(NavKey::Up);
+            if app.url_focused() {
+                app.handle_key_navigation(NavKey::Up);
+            } else {
+                app.handle_caret(CaretMove::Up, shift);
+            }
             true
         }
         VK_DOWN => {
-            app.handle_key_navigation(NavKey::Down);
+            if app.url_focused() {
+                app.handle_key_navigation(NavKey::Down);
+            } else {
+                app.handle_caret(CaretMove::Down, shift);
+            }
             true
         }
         VK_PRIOR => {
@@ -431,11 +809,11 @@ fn handle_key_down<A: PlatformApp>(
             true
         }
         VK_HOME => {
-            app.handle_key_navigation(NavKey::Home);
+            app.handle_caret(CaretMove::Home, shift);
             true
         }
         VK_END => {
-            app.handle_key_navigation(NavKey::End);
+            app.handle_caret(CaretMove::End, shift);
             true
         }
         _ => false,
@@ -443,7 +821,13 @@ fn handle_key_down<A: PlatformApp>(
 }
 
 unsafe fn sync_title_and_invalidate<A: PlatformApp>(state_ptr: *mut WinState<A>) {
-    let (hwnd, new_title, needs_repaint) = {
+    enum InvalidateRegion {
+        None,
+        Full,
+        Partial(BlitRect),
+    }
+
+    let (hwnd, new_title, invalidate) = {
         let state = &mut *state_ptr;
         let active = state.app.active_title();
         let title_change = if active != state.last_title {
@@ -452,7 +836,30 @@ unsafe fn sync_title_and_invalidate<A: PlatformApp>(state_ptr: *mut WinState<A>)
         } else {
             None
         };
-        (state.hwnd, title_change, state.app.needs_repaint())
+        let invalidate = if state.app.needs_repaint() {
+            let (vw, vh) = state.app.viewport_size();
+            match state.app.take_damage() {
+                Some(dmg) => {
+                    let clamped = dmg.clamp(vw, vh);
+                    if clamped.is_empty() {
+                        InvalidateRegion::None
+                    } else {
+                        state.pending_damage = merge_damage(state.pending_damage, Some(clamped));
+                        match damage_to_blit_rect(clamped, vw, vh) {
+                            Some(rect) => InvalidateRegion::Partial(rect),
+                            None => InvalidateRegion::Full,
+                        }
+                    }
+                }
+                None => {
+                    state.pending_full_repaint = true;
+                    InvalidateRegion::Full
+                }
+            }
+        } else {
+            InvalidateRegion::None
+        };
+        (state.hwnd, title_change, invalidate)
     };
 
     if hwnd.is_null() {
@@ -463,8 +870,20 @@ unsafe fn sync_title_and_invalidate<A: PlatformApp>(state_ptr: *mut WinState<A>)
         let wide = to_wide_null(&title);
         SetWindowTextW(hwnd, wide.as_ptr());
     }
-    if needs_repaint {
-        InvalidateRect(hwnd, ptr::null(), 0);
+    match invalidate {
+        InvalidateRegion::None => {}
+        InvalidateRegion::Full => {
+            InvalidateRect(hwnd, ptr::null(), 0);
+        }
+        InvalidateRegion::Partial(rect) => {
+            let rc = RECT {
+                left: rect.x as i32,
+                top: rect.y as i32,
+                right: (rect.x + rect.width) as i32,
+                bottom: (rect.y + rect.height) as i32,
+            };
+            InvalidateRect(hwnd, &rc, 0);
+        }
     }
 }
 
@@ -489,6 +908,9 @@ unsafe extern "system" fn wnd_proc<A: PlatformApp>(
     if msg == WM_NCDESTROY {
         let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WinState<A>;
         if !state_ptr.is_null() {
+            if let Some(mut surface) = (*state_ptr).dib_surface.take() {
+                surface.destroy();
+            }
             (*state_ptr).hwnd = ptr::null_mut();
         }
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -500,6 +922,12 @@ unsafe extern "system" fn wnd_proc<A: PlatformApp>(
     }
 
     if msg == WM_DESTROY {
+        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WinState<A>;
+        if !state_ptr.is_null() {
+            if let Some(mut surface) = (*state_ptr).dib_surface.take() {
+                surface.destroy();
+            }
+        }
         PostQuitMessage(0);
         return 0;
     }
@@ -529,17 +957,91 @@ unsafe extern "system" fn wnd_proc<A: PlatformApp>(
                 {
                     let state = &mut *state_ptr;
                     let (vw, vh) = state.app.viewport_size();
-                    if state.app.needs_repaint()
-                        || state.canvas.width != vw
-                        || state.canvas.height != vh
+                    let paint_rect = rect_from_paint_rect(&ps.rc_paint, vw, vh);
+                    let extra_damage = state.app.take_damage().map(|d| d.clamp(vw, vh));
+                    let combined_damage =
+                        merge_damage(state.pending_damage.take(), extra_damage);
+                    let pending_full = mem::take(&mut state.pending_full_repaint);
+
+                    let mut size_changed = false;
+                    if !state
+                        .dib_surface
+                        .as_ref()
+                        .is_some_and(|s| s.matches(vw, vh))
                     {
-                        if state.canvas.width != vw || state.canvas.height != vh {
-                            state.canvas.resize(vw, vh, Color::rgb(255, 255, 255));
+                        if let Some(mut old) = state.dib_surface.take() {
+                            old.destroy();
                         }
-                        state.app.render_into(&mut state.canvas);
-                        state.app.set_needs_repaint(false);
+                        state.dib_surface = DibSurface::create(hdc, vw, vh);
+                        size_changed = true;
                     }
-                    present_canvas(hdc, &state.canvas);
+
+                    let app_dirty = state.app.needs_repaint();
+                    let needs_render =
+                        app_dirty || size_changed || pending_full || combined_damage.is_some();
+
+                    let mut presented_dib = false;
+                    if let Some(surface) = state.dib_surface.as_mut() {
+                        if let Some(dst) = surface.pixels_mut() {
+                            report_present_backend(
+                                &mut state.app,
+                                &mut state.present_backend,
+                                "win32-dibsection",
+                            );
+                            if needs_render {
+                                let preserve_existing =
+                                    !size_changed && !pending_full && combined_damage.is_some();
+                                let app = &mut state.app;
+                                if preserve_existing {
+                                    Canvas::with_external_slice_unfilled(vw, vh, dst, |canvas| {
+                                        app.render_into(canvas);
+                                    });
+                                } else {
+                                    Canvas::with_external_slice(
+                                        vw,
+                                        vh,
+                                        dst,
+                                        Color::rgb(255, 255, 255),
+                                        |canvas| {
+                                            app.render_into(canvas);
+                                        },
+                                    );
+                                }
+                                app.set_needs_repaint(false);
+                            }
+
+                            let damage_blit =
+                                combined_damage.and_then(|d| damage_to_blit_rect(d, vw, vh));
+                            let blit_target = if size_changed || pending_full {
+                                clamp_rect_to_viewport(0, 0, vw, vh, vw, vh)
+                            } else {
+                                union_blit_rects(paint_rect, damage_blit)
+                                    .or_else(|| clamp_rect_to_viewport(0, 0, vw, vh, vw, vh))
+                            };
+                            if let Some(rect) = blit_target {
+                                presented_dib = surface.blit_rect(hdc, rect);
+                            }
+                        }
+                    }
+
+                    if !presented_dib {
+                        report_present_backend(
+                            &mut state.app,
+                            &mut state.present_backend,
+                            "win32-stretchdibits",
+                        );
+                        if needs_render
+                            || state.canvas.width != vw
+                            || state.canvas.height != vh
+                        {
+                            if state.canvas.width != vw || state.canvas.height != vh {
+                                state.canvas.resize(vw, vh, Color::rgb(255, 255, 255));
+                            }
+                            state.app.render_into(&mut state.canvas);
+                            state.app.set_needs_repaint(false);
+                        }
+                        present_canvas(hdc, &state.canvas);
+                    }
                 }
                 EndPaint(hwnd, &ps);
             }
@@ -635,9 +1137,7 @@ unsafe extern "system" fn wnd_proc<A: PlatformApp>(
             {
                 let state = &mut *state_ptr;
                 if let Some(ch) = decode_utf16_unit(&mut state.pending_surrogate, unit) {
-                    if ch == ' ' && !state.app.url_focused() {
-                        state.app.handle_key_navigation(NavKey::PageDown);
-                    } else if !ch.is_control() {
+                    if !ch.is_control() {
                         state.app.handle_text_input(ch);
                     }
                 }
@@ -694,9 +1194,14 @@ pub fn run<A: PlatformApp>(mut app: A) -> Result<(), String> {
     let title_wide = to_wide_null(&format_window_title(&last_title));
     let canvas = Canvas::new(vw, vh, Color::rgb(255, 255, 255));
 
+    app.set_present_backend("win32-dibsection");
     let state = Box::new(WinState {
         app,
         canvas,
+        dib_surface: None,
+        pending_damage: None,
+        pending_full_repaint: false,
+        present_backend: Some("win32-dibsection"),
         last_title,
         hwnd: ptr::null_mut(),
         pending_surrogate: None,
@@ -760,4 +1265,97 @@ pub fn run<A: PlatformApp>(mut app: A) -> Result<(), String> {
         drop(Box::from_raw(state_ptr));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bitmap_info_uses_top_down_32bpp_rgb_layout() {
+        assert_eq!(mem::size_of::<BITMAPINFOHEADER>(), 40);
+        assert_eq!(mem::size_of::<RGBQUAD>(), 4);
+        assert_eq!(mem::size_of::<BITMAPINFO>(), 44);
+
+        let bmi = top_down_bitmap_info(1280, 720).expect("valid 1280x720 bitmap info");
+        assert_eq!(bmi.bmi_header.bi_size, 40);
+        assert_eq!(bmi.bmi_header.bi_width, 1280);
+        assert_eq!(bmi.bmi_header.bi_height, -720);
+        assert_eq!(bmi.bmi_header.bi_planes, 1);
+        assert_eq!(bmi.bmi_header.bi_bit_count, 32);
+        assert_eq!(bmi.bmi_header.bi_compression, BI_RGB);
+    }
+
+    #[test]
+    fn bitmap_info_rejects_zero_and_overflow_dimensions() {
+        assert!(top_down_bitmap_info(0, 100).is_none());
+        assert!(top_down_bitmap_info(100, 0).is_none());
+        assert!(top_down_bitmap_info(i32::MAX as usize + 1, 1).is_none());
+        assert!(top_down_bitmap_info(1, i32::MAX as usize + 1).is_none());
+        assert!(top_down_bitmap_info(40_000, 40_000).is_none());
+    }
+
+    #[test]
+    fn blit_rect_clamps_and_unions_damage_and_paint_rects() {
+        let clamped = clamp_rect_to_viewport(120, 80, 400, 300, 320, 240).expect("visible slice");
+        assert_eq!(
+            clamped,
+            BlitRect {
+                x: 120,
+                y: 80,
+                width: 200,
+                height: 160,
+            }
+        );
+        assert!(clamp_rect_to_viewport(320, 0, 10, 10, 320, 240).is_none());
+        assert!(clamp_rect_to_viewport(0, 0, 0, 10, 320, 240).is_none());
+
+        let paint_rc = RECT {
+            left: -10,
+            top: 20,
+            right: 50,
+            bottom: 60,
+        };
+        let from_rc = rect_from_paint_rect(&paint_rc, 320, 240).expect("clamped paint rect");
+        assert_eq!(
+            from_rc,
+            BlitRect {
+                x: 0,
+                y: 20,
+                width: 50,
+                height: 40,
+            }
+        );
+
+        let unioned = union_blit_rects(Some(from_rc), Some(clamped)).expect("unioned rect");
+        assert_eq!(
+            unioned,
+            BlitRect {
+                x: 0,
+                y: 20,
+                width: 320,
+                height: 220,
+            }
+        );
+    }
+
+    // Live CreateDIBSection / BitBlt execution requires a Windows GDI host and
+    // is not exercised in Linux cross-compilation CI.
+    #[test]
+    fn empty_dib_surface_destroy_is_idempotent() {
+        let mut surface = DibSurface {
+            mem_dc: ptr::null_mut(),
+            bitmap: ptr::null_mut(),
+            old_bitmap: ptr::null_mut(),
+            bits: ptr::null_mut(),
+            width: 0,
+            height: 0,
+            len: 0,
+        };
+        assert!(surface.pixels_mut().is_none());
+        unsafe {
+            surface.destroy();
+            surface.destroy();
+        }
+    }
 }

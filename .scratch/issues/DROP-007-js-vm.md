@@ -1,9 +1,9 @@
 # DROP-007: Minimalist ES Subset Parser & Bytecode VM
 
 - **Phase:** 7
-- **Status:** `in-progress`
+- **Status:** `done`
 - **Blocked By:** `DROP-002`, `DROP-003` (both `done`)
-- **Implementation owner:** DeepSeek V4.1 Flash Free (OpenCode agent)
+- **Implementation owner:** Swarm Wave 1 (`js-vm`)
 
 ---
 

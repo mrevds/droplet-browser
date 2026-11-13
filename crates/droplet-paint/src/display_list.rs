@@ -6,6 +6,8 @@ use droplet_gfx::{Color, Rect};
 use droplet_layout::{BoxType, LayoutBox};
 use droplet_style::EdgeSizes;
 
+use crate::forms_overlay::{self, FormVisualState};
+
 #[derive(Debug, Clone)]
 pub enum DisplayCommand {
     SolidRect {
@@ -34,8 +36,24 @@ pub enum DisplayCommand {
 pub type DisplayList = Vec<DisplayCommand>;
 
 pub fn build_display_list(root: &LayoutBox) -> DisplayList {
+    build_display_list_with_forms(root, &FormVisualState::default())
+}
+
+/// Builds a display list with focus rings, carets, control contents and text
+/// selection overlays. The plain [`build_display_list`] path keeps identical
+/// command output for non-form pages.
+pub fn build_display_list_with_forms(root: &LayoutBox, forms: &FormVisualState) -> DisplayList {
+    let spans = forms
+        .page_selection
+        .as_ref()
+        .map(|sel| {
+            let entries = forms_overlay::collect_text_entries(root);
+            forms_overlay::selection_spans(&entries, sel)
+        })
+        .unwrap_or_default();
     let mut list = Vec::new();
-    emit_layout_box(root, &mut list);
+    let mut entry_index = 0usize;
+    emit_layout_box(root, &spans, &mut entry_index, forms, &mut list);
     list
 }
 
@@ -92,7 +110,16 @@ fn emit_border_edges(bb: Rect, border: EdgeSizes, border_color: Color, list: &mu
     }
 }
 
-fn emit_layout_box(layout_box: &LayoutBox, list: &mut DisplayList) {
+fn emit_layout_box(
+    layout_box: &LayoutBox,
+    spans: &[(usize, usize, usize)],
+    entry_index: &mut usize,
+    forms: &FormVisualState,
+    list: &mut DisplayList,
+) {
+    if matches!(layout_box.box_type, BoxType::Control(_)) {
+        forms_overlay::emit_focus_ring(layout_box, forms, list);
+    }
     let radius = layout_box.style.border_radius.max(0.0);
     let border = layout_box.dimensions.border;
     let border_color = layout_box.style.border_color;
@@ -162,6 +189,13 @@ fn emit_layout_box(layout_box: &LayoutBox, list: &mut DisplayList) {
             let y_pad = ((*line_height - *font_size) * 0.5).max(0.0);
             let base_x = layout_box.dimensions.content.x;
             let base_y = layout_box.dimensions.content.y;
+            if layout_box.node_id.is_some() {
+                if let Some((_, start, end)) =
+                    spans.iter().find(|(idx, _, _)| *idx == *entry_index).copied()
+                {
+                    forms_overlay::emit_text_selection_range(layout_box, start, end, list);
+                }
+            }
             for (idx, line) in lines.iter().enumerate() {
                 if line.is_empty() {
                     continue;
@@ -194,6 +228,9 @@ fn emit_layout_box(layout_box: &LayoutBox, list: &mut DisplayList) {
                 image: img.clone(),
             });
         }
+        BoxType::Control(control) => {
+            forms_overlay::emit_control(layout_box, control, forms, list);
+        }
         BoxType::Image { image: None, alt } => {
             let label = if alt.is_empty() { "[img]" } else { alt.as_str() };
             let fs = layout_box.style.font_size.clamp(11.0, 14.0);
@@ -219,7 +256,11 @@ fn emit_layout_box(layout_box: &LayoutBox, list: &mut DisplayList) {
         _ => {}
     }
 
+    if matches!(layout_box.box_type, BoxType::Text { .. }) && layout_box.node_id.is_some() {
+        *entry_index += 1;
+    }
+
     for child in &layout_box.children {
-        emit_layout_box(child, list);
+        emit_layout_box(child, spans, entry_index, forms, list);
     }
 }

@@ -8,6 +8,7 @@ use droplet_gfx::image::DecodedImage;
 use droplet_gfx::Rect;
 use droplet_style::{ComputedStyle, Display, EdgeSizes, StyledNode};
 
+use crate::forms::{self, ControlBox};
 use crate::{block, flex, replaced};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -60,6 +61,7 @@ pub enum BoxType {
         image: Option<Arc<DecodedImage>>,
         alt: String,
     },
+    Control(ControlBox),
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +85,20 @@ pub fn dump_layout(root: &LayoutBox) -> String {
     out
 }
 
+/// Finds the first layout box carrying `node_id`, preserving document order.
+pub fn find_layout_box_by_node(root: &LayoutBox, node_id: NodeId) -> Option<&LayoutBox> {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.node_id == Some(node_id) {
+            return Some(node);
+        }
+        for child in node.children.iter().rev() {
+            stack.push(child);
+        }
+    }
+    None
+}
+
 fn dump_layout_rec(node: &LayoutBox, depth: usize, out: &mut String) {
     let indent = "  ".repeat(depth);
     let r = node.dimensions.content;
@@ -94,6 +110,7 @@ fn dump_layout_rec(node: &LayoutBox, depth: usize, out: &mut String) {
         BoxType::AnonymousBlock => "AnonymousBlock",
         BoxType::Text { .. } => "Text",
         BoxType::Image { .. } => "Image",
+        BoxType::Control(_) => "Control",
     };
     let _ = write!(
         out,
@@ -112,6 +129,19 @@ fn dump_layout_rec(node: &LayoutBox, depth: usize, out: &mut String) {
         }
         BoxType::Image { image, alt } if image.is_none() && !alt.is_empty() => {
             let _ = write!(out, " alt=\"{}\"", alt);
+        }
+        BoxType::Control(control) => {
+            let _ = write!(out, " {:?}", control.kind);
+            if control.checked {
+                let _ = write!(out, " checked");
+            }
+            if control.disabled {
+                let _ = write!(out, " disabled");
+            }
+            if !control.text.is_empty() {
+                let preview: String = control.text.chars().take(40).collect();
+                let _ = write!(out, " \"{}\"", preview);
+            }
         }
         _ => {}
     }
@@ -297,6 +327,17 @@ pub(crate) fn box_dispatch(
     forced_content_w: Option<f32>,
     forced_content_h: Option<f32>,
 ) -> LayoutBox {
+    if styled.style.display != Display::None && forms::is_control_element(ctx.doc, styled.node_id) {
+        return forms::layout_control_box(
+            ctx,
+            styled,
+            containing_rect,
+            border_box_y,
+            containing_height,
+            forced_content_w,
+            forced_content_h,
+        );
+    }
     if replaced::is_img_element(ctx.doc, styled.node_id) {
         return replaced::layout_image_box(
             ctx,

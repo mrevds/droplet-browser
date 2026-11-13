@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use droplet_dom::html;
 use droplet_dom::{Document, ElementData, NodeKind};
+use droplet_desktop::{renderer_child, renderer_host};
 use droplet_image::DecodedImage;
 use droplet_shell::Browser;
 use droplet_style::css::{self, Stylesheet};
@@ -21,8 +22,10 @@ fn print_usage() {
          USAGE:\n\
          \tdroplet [URL]\n\
          \tdroplet --screenshot <out.ppm> [URL]\n\
+         \tdroplet --sandbox-screenshot <out.ppm> [URL]\n\
          \tdroplet --dump-dom [URL]\n\
          \tdroplet --dump-layout [URL]\n\
+         \tdroplet --renderer [--renderer-w <W> --renderer-h <H>]\n\
          \tdroplet --help | -h\n\n\
          BUILT-IN PAGES:\n\
          \tabout:droplet, about:roadmap, about:architecture, about:test, about:blank"
@@ -198,6 +201,7 @@ fn dump_layout_for_url(url: &str) -> Result<String, String> {
         viewport_height: vp_h,
         hovered_node: None,
         active_node: None,
+        focused_node: None,
     };
     if let Some(styled) = droplet_style::style_tree_with_context(&doc, &sheet, &ctx) {
         let root = droplet_layout::layout_tree(&doc, &styled, vp_w, vp_h, &images);
@@ -274,6 +278,51 @@ fn main() {
                 out_path.display()
             );
         }
+        "--sandbox-screenshot" => {
+            if args.len() < 2 || args.len() > 3 {
+                eprintln!("Error: --sandbox-screenshot requires <out.ppm> and optional [URL]");
+                print_usage();
+                process::exit(2);
+            }
+            let out_path = Path::new(&args[1]);
+            let url = args.get(2).map(String::as_str).unwrap_or(DEFAULT_URL);
+            match run_sandbox_screenshot(out_path, url) {
+                Ok((sandbox, frame)) => {
+                    println!(
+                        "Ready(seccomp_applied={}, user_ns_isolated={}, net_ns_isolated={})",
+                        sandbox.seccomp_applied,
+                        sandbox.user_ns_isolated,
+                        sandbox.net_ns_isolated
+                    );
+                    println!(
+                        "Saved {}x{} sandboxed screenshot to {} (title={:?}, layout_ms={:.2}, paint_ms={:.2})",
+                        frame.width,
+                        frame.height,
+                        out_path.display(),
+                        frame.title,
+                        frame.layout_ms,
+                        frame.paint_ms
+                    );
+                }
+                Err(err) => {
+                    eprintln!("Error: {err}");
+                    process::exit(1);
+                }
+            }
+        }
+        "--renderer" => {
+            let (w, h) = match renderer_child::parse_renderer_dimensions(&args[1..]) {
+                Ok(dims) => dims,
+                Err(err) => {
+                    eprintln!("Error: {err}");
+                    process::exit(2);
+                }
+            };
+            if let Err(err) = renderer_child::run_renderer_child(w, h) {
+                eprintln!("Renderer child error: {err}");
+                process::exit(1);
+            }
+        }
         flag if flag.starts_with('-') => {
             eprintln!("Error: unknown option '{flag}'");
             print_usage();
@@ -288,6 +337,26 @@ fn main() {
             run_gui(url);
         }
     }
+}
+
+fn run_sandbox_screenshot(
+    out_path: &Path,
+    url: &str,
+) -> Result<(renderer_host::RendererSandboxInfo, renderer_host::RemoteFrame), String> {
+    let prefetched = renderer_host::prefetch_page_payload(url)?;
+    let mut host =
+        renderer_host::RendererHost::spawn(HEADLESS_VIEWPORT_WIDTH, HEADLESS_VIEWPORT_HEIGHT)?;
+    let sandbox = host.sandbox_info();
+    let frame = host.render_page(&prefetched.url, &prefetched.html, prefetched.assets, 0.0)?;
+    let canvas = host.snapshot_canvas();
+    canvas.write_ppm(out_path).map_err(|err| {
+        format!(
+            "failed to write sandboxed screenshot '{}': {err}",
+            out_path.display()
+        )
+    })?;
+    host.shutdown()?;
+    Ok((sandbox, frame))
 }
 
 fn run_gui(url: &str) {

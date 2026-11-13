@@ -1,6 +1,7 @@
 mod block;
 mod box_model;
 mod flex;
+mod forms;
 mod hit_test;
 mod inline;
 mod replaced;
@@ -15,7 +16,8 @@ use droplet_style::StyledNode;
 pub use droplet_gfx::Rect;
 pub use droplet_style::EdgeSizes;
 
-pub use box_model::{dump_layout, BoxType, Dimensions, LayoutBox};
+pub use box_model::{dump_layout, find_layout_box_by_node, BoxType, Dimensions, LayoutBox};
+pub use forms::{control_kind, control_snapshot, control_value, selected_option, ControlBox, ControlKind};
 pub use hit_test::{hit_test, hit_test_href, hit_test_node};
 
 use box_model::{box_dispatch, LayoutCtx};
@@ -48,7 +50,10 @@ mod tests {
     use droplet_style::css::{self, Stylesheet};
     use droplet_style::style_tree;
 
-    use super::{dump_layout, hit_test, hit_test_href, hit_test_node, layout_tree, BoxType, LayoutBox};
+    use super::{
+        dump_layout, find_layout_box_by_node, hit_test, hit_test_href, hit_test_node, layout_tree,
+        BoxType, ControlKind, LayoutBox,
+    };
 
     fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -470,6 +475,31 @@ mod tests {
     }
 
     #[test]
+    fn test_find_layout_box_by_node_matches_deep_text_box() {
+        let mut doc = Document::new();
+        let card = doc.create_element(
+            "div",
+            attrs(&[("style", "display: block; width: 200px; height: 100px;")]),
+        );
+        let span = doc.create_element("span", HashMap::new());
+        let txt = doc.create_text("Click");
+        doc.append_child(doc.root(), card);
+        doc.append_child(card, span);
+        doc.append_child(span, txt);
+
+        let styled = style_tree(&doc, &Stylesheet::default()).unwrap();
+        let laid = layout_tree(&doc, &styled, 400.0, 400.0, &HashMap::new());
+
+        let card_box = find_layout_box_by_node(&laid, card).expect("card box");
+        assert_eq!(card_box.node_id, Some(card));
+        assert!((card_box.dimensions.content.width - 200.0).abs() < 0.01);
+
+        let text_box = find_layout_box_by_node(&laid, txt).expect("text box");
+        assert!(matches!(text_box.box_type, BoxType::Text { .. }));
+        assert!(find_layout_box_by_node(&laid, 9999).is_none());
+    }
+
+    #[test]
     fn test_percentage_sizing_ignores_auto_parent_height() {
         let mut doc = Document::new();
         let auto_parent = doc.create_element("div", attrs(&[("style", "width: 400px;")]));
@@ -500,5 +530,120 @@ mod tests {
         let c_def = &laid.children[1].children[0];
         assert_eq!(c_def.dimensions.content.width, 200.0);
         assert_eq!(c_def.dimensions.content.height, 100.0);
+    }
+
+    #[test]
+    fn test_form_controls_atomic_layout_and_password_masking() {
+        let mut doc = Document::new();
+        let form = doc.create_element("form", Vec::new());
+        let txt = doc.create_element(
+            "input",
+            attrs(&[
+                ("type", "text"),
+                ("name", "user"),
+                ("value", "Привет"),
+                ("placeholder", "Имя"),
+            ]),
+        );
+        let pwd = doc.create_element(
+            "input",
+            attrs(&[("type", "password"), ("name", "pw"), ("value", "секрет")]),
+        );
+        let chk = doc.create_element("input", attrs(&[("type", "checkbox"), ("checked", "")]));
+        let rad = doc.create_element("input", attrs(&[("type", "radio")]));
+        let sub = doc.create_element("input", attrs(&[("type", "submit"), ("value", "Отправить")]));
+        let area = doc.create_element("textarea", Vec::new());
+        let area_txt = doc.create_text("line1\nline2");
+        let sel = doc.create_element("select", Vec::new());
+        let opt1 = doc.create_element("option", attrs(&[("value", "a")]));
+        let opt1_t = doc.create_text("First");
+        let opt2 = doc.create_element("option", attrs(&[("value", "b"), ("selected", "")]));
+        let opt2_t = doc.create_text("Выбор");
+        let btn = doc.create_element("button", attrs(&[("disabled", "")]));
+        let btn_t = doc.create_text("Go");
+
+        doc.append_child(doc.root(), form);
+        doc.append_child(form, txt);
+        doc.append_child(form, pwd);
+        doc.append_child(form, chk);
+        doc.append_child(form, rad);
+        doc.append_child(form, sub);
+        doc.append_child(form, area);
+        doc.append_child(area, area_txt);
+        doc.append_child(form, sel);
+        doc.append_child(sel, opt1);
+        doc.append_child(opt1, opt1_t);
+        doc.append_child(sel, opt2);
+        doc.append_child(opt2, opt2_t);
+        doc.append_child(form, btn);
+        doc.append_child(btn, btn_t);
+
+        let styled = style_tree(&doc, &Stylesheet::default()).unwrap();
+        let laid = layout_tree(&doc, &styled, 800.0, 600.0, &HashMap::new());
+        let controls = collect_boxes_by_type(&laid, &|bt| matches!(bt, BoxType::Control(_)));
+        assert_eq!(controls.len(), 8);
+
+        match &controls[0].box_type {
+            BoxType::Control(c) => {
+                assert_eq!(c.kind, ControlKind::TextInput);
+                assert_eq!(c.text, "Привет");
+                assert_eq!(c.placeholder, "Имя");
+                assert!(controls[0].dimensions.content.width >= 100.0);
+            }
+            _ => unreachable!(),
+        }
+        match &controls[1].box_type {
+            BoxType::Control(c) => {
+                assert_eq!(c.kind, ControlKind::PasswordInput);
+                assert_eq!(c.text, "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}");
+            }
+            _ => unreachable!(),
+        }
+        match &controls[2].box_type {
+            BoxType::Control(c) => {
+                assert_eq!(c.kind, ControlKind::Checkbox);
+                assert!(c.checked);
+                assert_eq!(controls[2].dimensions.content.width, 14.0);
+            }
+            _ => unreachable!(),
+        }
+        match &controls[3].box_type {
+            BoxType::Control(c) => {
+                assert_eq!(c.kind, ControlKind::Radio);
+                assert!(!c.checked);
+            }
+            _ => unreachable!(),
+        }
+        match &controls[4].box_type {
+            BoxType::Control(c) => {
+                assert_eq!(c.kind, ControlKind::Submit);
+                assert_eq!(c.text, "Отправить");
+            }
+            _ => unreachable!(),
+        }
+        match &controls[5].box_type {
+            BoxType::Control(c) => {
+                assert_eq!(c.kind, ControlKind::Textarea);
+                assert_eq!(c.text, "line1\nline2");
+                assert!(controls[5].children.is_empty());
+            }
+            _ => unreachable!(),
+        }
+        match &controls[6].box_type {
+            BoxType::Control(c) => {
+                assert_eq!(c.kind, ControlKind::Select);
+                assert_eq!(c.text, "Выбор");
+                assert!(controls[6].children.is_empty());
+            }
+            _ => unreachable!(),
+        }
+        match &controls[7].box_type {
+            BoxType::Control(c) => {
+                assert_eq!(c.kind, ControlKind::Button);
+                assert!(c.disabled);
+                assert_eq!(c.text, "Go");
+            }
+            _ => unreachable!(),
+        }
     }
 }

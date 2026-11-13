@@ -7,69 +7,87 @@ use droplet_image::DecodedImage;
 use droplet_style::{css, Stylesheet};
 use droplet_url::Url;
 
+use crate::js::{collect_page_scripts, ScriptUnit};
+
 const MAX_STYLESHEETS_PER_PAGE: usize = 32;
 const MAX_IMAGES_PER_PAGE: usize = 64;
 const MAX_IMAGE_CONCURRENCY: usize = 4;
 
-/// Parsed document, combined stylesheet, interaction flag, and decoded images ready for layout.
+/// Parsed document, combined stylesheet, interaction flag, decoded images, and scripts ready for execution.
 pub struct LoadedPage {
     pub final_url: Url,
     pub doc: Document,
     pub stylesheet: Stylesheet,
     pub uses_interaction: bool,
     pub images: HashMap<String, Arc<DecodedImage>>,
+    pub scripts: Vec<ScriptUnit>,
     pub title_override: Option<String>,
     pub status_override: String,
+    /// Whether the top-level navigation succeeded and may be recorded in history.
+    pub load_ok: bool,
 }
 
 /// Fetches `url`, normalizes plain-text/empty-error responses into HTML, parses DOM and CSS,
 /// and concurrently loads bounded subresource stylesheets and images.
 pub fn load_url_document(url: &Url) -> LoadedPage {
     match droplet_net::fetch(url) {
-        Ok(resp) => {
-            let final_url = resp.url.clone();
-            let ct = resp.content_type.to_ascii_lowercase();
-            let (html_source, fetch_subresources) =
-                if ct.starts_with("text/plain") || ct.starts_with("text/css") {
-                    (
-                        format!(
-                            "<!DOCTYPE html><html><head><title>{}</title></head><body><pre>{}</pre></body></html>",
-                            escape_html(final_url.as_str()),
-                            escape_html(&resp.body)
-                        ),
-                        false,
-                    )
-                } else if resp.status >= 400 && resp.body.trim().is_empty() {
-                    (
-                        build_error_html(
-                            final_url.as_str(),
-                            &format!("HTTP status {}", resp.status),
-                        ),
-                        false,
-                    )
-                } else {
-                    (resp.body, true)
-                };
+        Ok(resp) => loaded_page_from_response(resp),
+        Err(err) => load_error_page(url, &err),
+    }
+}
 
-            build_loaded_page(
-                final_url,
-                &html_source,
-                None,
-                String::new(),
-                fetch_subresources,
-            )
-        }
-        Err(err) => {
-            let err_html = build_error_html(url.as_str(), &err.to_string());
-            build_loaded_page(
-                url.clone(),
-                &err_html,
-                Some("Load Error".to_string()),
-                format!("Load error: {err}"),
+/// Fetches `url` with a form-encoded POST body and parses the response page.
+pub fn load_url_document_post(url: &Url, body: &str) -> LoadedPage {
+    match droplet_net::fetch_post(url, body, "application/x-www-form-urlencoded") {
+        Ok(resp) => loaded_page_from_response(resp),
+        Err(err) => load_error_page(url, &err),
+    }
+}
+
+fn loaded_page_from_response(resp: droplet_net::Response) -> LoadedPage {
+    let final_url = resp.url.clone();
+    let ct = resp.content_type.to_ascii_lowercase();
+    let (html_source, fetch_subresources) =
+        if ct.starts_with("text/plain") || ct.starts_with("text/css") {
+            (
+                format!(
+                    "<!DOCTYPE html><html><head><title>{}</title></head><body><pre>{}</pre></body></html>",
+                    escape_html(final_url.as_str()),
+                    escape_html(&resp.body)
+                ),
                 false,
             )
-        }
-    }
+        } else if resp.status >= 400 && resp.body.trim().is_empty() {
+            (
+                build_error_html(final_url.as_str(), &format!("HTTP status {}", resp.status)),
+                false,
+            )
+        } else {
+            (resp.body, true)
+        };
+
+    let mut page = build_loaded_page(
+        final_url,
+        &html_source,
+        None,
+        String::new(),
+        fetch_subresources,
+    );
+    page.load_ok = resp.status < 400;
+    page
+}
+
+fn load_error_page(url: &Url, err: &droplet_net::NetError) -> LoadedPage {
+    let err_html = build_error_html(url.as_str(), &err.to_string());
+    let mut page = build_loaded_page(
+        url.clone(),
+        &err_html,
+        Some("Load Error".to_string()),
+        format!("Load error: {err}"),
+        false,
+    );
+    page.load_ok = false;
+    page
 }
 
 /// Builds a `LoadedPage` from raw HTML without performing top-level navigation fetching.
@@ -96,27 +114,33 @@ pub fn build_loaded_page(
         HashMap::new()
     };
 
+    let scripts = collect_page_scripts(&doc, &final_url, fetch_subresources);
+
     LoadedPage {
         final_url,
         doc,
         stylesheet,
         uses_interaction,
         images,
+        scripts,
         title_override,
         status_override,
+        load_ok: true,
     }
 }
 
 /// Builds a friendly error `LoadedPage` when a URL fails to parse or resolve.
 pub fn build_navigation_error_page(base_url: Url, target: &str, err_msg: &str) -> LoadedPage {
     let err_html = build_error_html(target, err_msg);
-    build_loaded_page(
+    let mut page = build_loaded_page(
         base_url,
         &err_html,
         Some("Navigation Error".to_string()),
         format!("URL error: {err_msg}"),
         false,
-    )
+    );
+    page.load_ok = false;
+    page
 }
 
 fn is_data_uri(uri: &str) -> bool {

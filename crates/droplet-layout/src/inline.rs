@@ -10,6 +10,7 @@ use crate::box_model::{
     font_scale_for, measure_text, resolve_max_width, resolve_width, shift_layout_box, BoxType,
     Dimensions, LayoutBox, LayoutCtx,
 };
+use crate::forms;
 use crate::{block, flex, replaced};
 
 fn layout_inline_block_atomic(
@@ -18,6 +19,23 @@ fn layout_inline_block_atomic(
     avail_w: f32,
     containing_height: Option<f32>,
 ) -> LayoutBox {
+    if forms::is_control_element(ctx.doc, styled.node_id) {
+        let container = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: avail_w.max(0.0),
+            height: containing_height.unwrap_or(0.0),
+        };
+        return forms::layout_control_box(
+            ctx,
+            styled,
+            container,
+            0.0,
+            containing_height,
+            None,
+            None,
+        );
+    }
     if replaced::is_img_element(ctx.doc, styled.node_id) {
         let container = Rect {
             x: 0.0,
@@ -108,6 +126,11 @@ pub(crate) fn measure_intrinsic_content_width(
         return (0.0, 0.0);
     }
 
+    if forms::is_control_element(ctx.doc, node.node_id) {
+        let w = forms::measure_control_content_width(ctx, node, avail_w);
+        return (w, w);
+    }
+
     if replaced::is_img_element(ctx.doc, node.node_id) {
         let resolved =
             replaced::resolve_image_content_size(ctx, node, avail_w, None, None, None);
@@ -166,12 +189,7 @@ pub(crate) fn measure_intrinsic_content_width(
                     }
                     let (c_min, c_max) = measure_intrinsic_content_width(ctx, child, child_avail);
                     let (ml, mr) = fixed_horizontal_margins(child.style);
-                    let extra = child.style.padding.left
-                        + child.style.padding.right
-                        + child.style.border.left
-                        + child.style.border.right
-                        + ml
-                        + mr;
+                    let extra = forms::control_extra_horizontal(ctx.doc, child) + ml + mr;
                     let basis_w = match child.style.flex_basis {
                         FlexBasis::Px(px) if is_row => Some(px.max(0.0)),
                         _ => None,
@@ -224,10 +242,7 @@ pub(crate) fn measure_intrinsic_content_width(
                 }
 
                 let (c_min, c_max) = measure_intrinsic_content_width(ctx, child, child_avail);
-                let pad_bdr = child.style.padding.left
-                    + child.style.padding.right
-                    + child.style.border.left
-                    + child.style.border.right;
+                let pad_bdr = forms::control_extra_horizontal(ctx.doc, child);
                 let mar = if child.style.display == Display::Inline {
                     0.0
                 } else {
@@ -407,7 +422,10 @@ fn collect_inline_pieces<'a>(
     if node.style.display == Display::None {
         return;
     }
-    if node.style.display == Display::InlineBlock || replaced::is_img_element(doc, node.node_id) {
+    if node.style.display == Display::InlineBlock
+        || replaced::is_img_element(doc, node.node_id)
+        || forms::is_control_element(doc, node.node_id)
+    {
         out.push(InlinePiece::AtomicBox { node });
         return;
     }

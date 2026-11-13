@@ -295,7 +295,7 @@ fn auto_close_until(
     }
 }
 
-fn is_void_tag(tag: &str) -> bool {
+pub(crate) fn is_void_tag(tag: &str) -> bool {
     matches!(
         tag,
         "area"

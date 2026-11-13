@@ -10,10 +10,12 @@ dependencies = [
  "droplet-font",
  "droplet-gfx",
  "droplet-image",
+ "droplet-ipc",
  "droplet-layout",
  "droplet-net",
  "droplet-paint",
  "droplet-platform",
+ "droplet-sandbox",
  "droplet-shell",
  "droplet-style",
  "droplet-url",
@@ -40,6 +42,14 @@ name = "droplet-image"
 version = "0.1.0"
 
 [[package]]
+name = "droplet-ipc"
+version = "0.1.0"
+
+[[package]]
+name = "droplet-js"
+version = "0.1.0"
+
+[[package]]
 name = "droplet-layout"
 version = "0.1.0"
 dependencies = [
@@ -52,6 +62,7 @@ dependencies = [
 name = "droplet-net"
 version = "0.1.0"
 dependencies = [
+ "droplet-storage",
  "droplet-url",
 ]
 
@@ -72,6 +83,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "droplet-sandbox"
+version = "0.1.0"
+
+[[package]]
 name = "droplet-shell"
 version = "0.1.0"
 dependencies = [
@@ -79,13 +94,19 @@ dependencies = [
  "droplet-font",
  "droplet-gfx",
  "droplet-image",
+ "droplet-js",
  "droplet-layout",
  "droplet-net",
  "droplet-paint",
  "droplet-platform",
+ "droplet-storage",
  "droplet-style",
  "droplet-url",
 ]
+
+[[package]]
+name = "droplet-storage"
+version = "0.1.0"
 
 [[package]]
 name = "droplet-style"

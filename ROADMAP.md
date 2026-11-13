@@ -87,7 +87,7 @@
 
 ---
 
-### Phase 5 (`DROP-005`) — Forms, Selection & Interactive Controls `[READY]`
+### Phase 5 (`DROP-005`) — Forms, Selection & Interactive Controls `[DONE]`
 Полноценное взаимодействие с формами и текстом на странице:
 - HTML-элементы управления: `<input>` (`text`, `password`, `checkbox`, `radio`, `submit`), `<textarea>`, `<button>`, `<select>`.
 - Система фокуса (`focused_node: Option<NodeId>`), навигация по `Tab` / `Shift+Tab`, визуальное кольцо фокуса (focus ring), отправка форм (`GET` / `POST` query-encoding).
@@ -95,30 +95,30 @@
 
 ---
 
-### Phase 6 (`DROP-006`) — Persistent Bookmarks/History, Find-in-Page & DevTools `[READY]`
+### Phase 6 (`DROP-006`) — Persistent Bookmarks/History, Find-in-Page & DevTools `[DONE]`
 *(Примечание: базовый Multi-Tab UI `TabState`, горячие клавиши `Ctrl+T`/`Ctrl+W`/`Ctrl+Tab` и Tab Hibernation уже реализованы в Phase 4 / `browser.rs`.)*  
 Дальнейшее развитие daily-driver оболочки и инструментов разработчика:
-- Персистентные закладки и история посещений (компактный append-log или бинарный store с быстрым префиксным автодополнением в адресной строке).
-- Поиск по странице (`Ctrl+F` с подсветкой совпадений и переходами `Enter`/`Shift+Enter`), быстрый command palette / `Ctrl+1..9` переключение вкладок.
+- Персистентные закладки и история посещений (компактный бинарный store `crates/droplet-storage` с быстрым префиксным автодополнением в адресной строке, `about:history` / `about:bookmarks`).
+- Поиск по странице (`Ctrl+F` с подсветкой совпадений и переходами `Enter`/`Shift+Enter`), быстрое переключение вкладок `Ctrl+1..9`.
 - Встроенный **Box Model Inspector Overlay** (подсветка `content` / `padding` / `border` / `margin` под курсором, просмотр дерева DOM/ComputedStyle).
 
 ---
 
-### Phase 7 (`DROP-007`, `DROP-008`) — Minimalist Scripting & Reactive DOM `[DROP-007 READY / DROP-008 BLOCKED]`
+### Phase 7 (`DROP-007`, `DROP-008`) — Minimalist Scripting & Reactive DOM `[DONE]`
 Поддержка базового клиентского JavaScript без монструозного JIT:
-- **DROP-007 (Bytecode VM — `READY`):** компактный парсер и регистровая/стековая bytecode VM для ES-подмножества (переменные, функции, замыкания, объекты, массивы, базовый event loop и таймеры).
-- **DROP-008 (Reactive DOM Bindings — `BLOCKED by DROP-005, DROP-007`):** минимальные DOM API (`document.querySelector`, `getElementById`, `addEventListener`, `textContent`, `classList`, `style`), а также DOM mutation observer, выставляющий точечные `dirty`-флаги для инкрементального relayout/repaint.
+- **DROP-007 (Bytecode VM — `DONE`):** компактный парсер и стековая bytecode VM в `crates/droplet-js` (переменные, функции, замыкания, объекты, массивы, базовый event loop и таймеры).
+- **DROP-008 (Reactive DOM Bindings — `DONE`):** `DomHost` + минимальные DOM API (`document.querySelector`, `getElementById`, `addEventListener`, `textContent`, `classList`, `style`), диспетчеризация событий (bubbling + `preventDefault`/`stopPropagation`) и `DirtyFlags` для инкрементального relayout/repaint.
 
 ---
 
-### Phase 8 (`DROP-009`, `DROP-010`) — Hardware GPU Rendering & Multi-Process Sandbox `[BLOCKED]`
+### Phase 8 (`DROP-009`, `DROP-010`) — Hardware GPU Rendering & Multi-Process Sandbox `[DONE]`
 Финальный уровень производительности и безопасности:
-- **DROP-009 (Hardware GPU / Zero-Copy Blitting — `BLOCKED by DROP-006`):** переход на X11 `MIT-SHM` / Win32 `DIBSection` / Direct2D/D3D11 или `wgpu`/Vulkan для 60/120+ FPS при скроллинге тяжёлых страниц без лишних копирований буфера кадра.
-- **DROP-010 (Multi-Process Sandbox — `BLOCKED by DROP-008, DROP-009`):** разделение на привилегированный Browser/UI-процесс и изолированные Renderer-процессы (Linux namespaces `CLONE_NEWUSER`/`CLONE_NEWNET` + `seccomp-bpf` + `memfd_create` IPC на Linux; Windows Job Objects + AppContainer/restricted token на Windows).
+- **DROP-009 (Hardware GPU / Zero-Copy Blitting — `DONE`):** X11 `MIT-SHM`, Win32 `DIBSection` (`BitBlt`), Wayland `wl_shm` `damage_buffer`, external-slice `Canvas` и `DamageRect`-трекинг без лишних копирований буфера кадра.
+- **DROP-010 (Multi-Process Sandbox — `DONE`):** разделение на привилегированный Browser/UI-процесс (`RendererHost` в `apps/droplet-desktop`) и изолированные `--renderer`-процессы (`crates/droplet-sandbox`: Linux `seccomp-bpf` + namespaces/`rlimit`, Windows Job Objects + Restricted Token, macOS `sandbox_init`; `crates/droplet-ipc`: `memfd`/shared framebuffer + бинарный IPC протокол; `HeadlessRenderer` в `crates/droplet-shell`).
 
 ---
 
-### Phase 9 / Cross-Platform & Media Polish (`DROP-011`) — Wayland, Windows Schannel TLS & JPEG `[READY]`
+### Phase 9 / Cross-Platform & Media Polish (`DROP-011`) — Wayland, Windows Schannel TLS & JPEG `[DONE]`
 Доводка кроссплатформенного стека и недостающих форматов без добавления тяжёлых крейтов:
 - **Wayland Native Client (`crates/droplet-platform/src/linux_wayland.rs`):** runtime `dlopen("libwayland-client.so.0")` + `xdg-shell` + shared-memory (`memfd_create` / `wl_shm`) с автоматическим fallback на X11 (`linux_x11.rs`), если Wayland compositor недоступен.
 - **Windows Schannel TLS (`crates/droplet-net/src/lib.rs`):** нативный TLS-клиент на Windows через `secur32.dll` / `crypt32.dll` (`InitializeSecurityContextW` + проверка системного хранилища сертификатов Windows) для работы `https://` без OpenSSL.

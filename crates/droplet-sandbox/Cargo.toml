@@ -1,0 +1,8 @@
+[package]
+name = "droplet-sandbox"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-dependency OS renderer process sandboxing for Droplet"
+authors = ["Droplet Contributors"]
+
+[dependencies]

@@ -1346,4 +1346,216 @@ mod tests {
         let invalid_marker = [0xFF, 0xD8, 0xFF, 0xBB, 0x00, 0x02, 0xFF, 0xD9];
         assert!(decode(&invalid_marker).is_err());
     }
+
+    #[test]
+    fn jpeg_grayscale_multi_mcu_with_restart_intervals_and_wrap() {
+        let make_dc = |val: i32| -> [i32; 64] {
+            let mut b = [0i32; 64];
+            b[0] = (val - 128) * 8;
+            b
+        };
+
+        // 10 MCUs (80x8) with DRI=1 forces RST0..RST7 and wraps back to RST0 before MCU 9.
+        let levels = [10i32, 35, 60, 85, 110, 135, 160, 185, 210, 240];
+        let mcus: Vec<Vec<[i32; 64]>> = levels.iter().map(|&v| vec![make_dc(v)]).collect();
+        let jpeg = build_baseline_jpeg(80, 8, &[(1, 1, 1, 0)], &mcus, 1, false);
+
+        // Verify RST0..RST7 and wrapped RST0 markers are actually present in stream.
+        for rst in 0u8..8 {
+            let marker = [0xFF, 0xD0 + rst];
+            assert!(
+                jpeg.windows(2).any(|w| w == marker),
+                "expected restart marker 0xFF{:02X} in stream",
+                0xD0 + rst
+            );
+        }
+
+        let img = decode(&jpeg).expect("multi-MCU grayscale JPEG with DRI wrap must decode");
+        assert_eq!(img.width, 80);
+        assert_eq!(img.height, 8);
+        for (mcu_idx, &expected) in levels.iter().enumerate() {
+            let x = mcu_idx * 8 + 3;
+            let idx = (4 * 80 + x) * 4;
+            assert_eq!(
+                &img.rgba[idx..idx + 4],
+                &[expected as u8, expected as u8, expected as u8, 255]
+            );
+        }
+    }
+
+    #[test]
+    fn jpeg_ycbcr_444_without_dri_and_420_multi_mcu_with_dri() {
+        let make_dc = |val: i32| -> [i32; 64] {
+            let mut b = [0i32; 64];
+            b[0] = (val - 128) * 8;
+            b
+        };
+
+        // 4:4:4 without DRI, 15x9 (2x2 = 4 MCUs, partial right & bottom edges).
+        let mcus_444 = vec![
+            vec![make_dc(76), make_dc(85), make_dc(255)],   // top-left: Red
+            vec![make_dc(150), make_dc(44), make_dc(21)],   // top-right: Green
+            vec![make_dc(29), make_dc(255), make_dc(107)],  // bottom-left: Blue
+            vec![make_dc(255), make_dc(128), make_dc(128)], // bottom-right: White
+        ];
+        let jpeg_444 = build_baseline_jpeg(
+            15,
+            9,
+            &[(1, 1, 1, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
+            &mcus_444,
+            0,
+            false,
+        );
+        let img_444 = decode(&jpeg_444).expect("4:4:4 multi-MCU without DRI must decode");
+        assert_eq!(img_444.width, 15);
+        assert_eq!(img_444.height, 9);
+        let p444 = |x: usize, y: usize| -> [u8; 4] {
+            let i = (y * 15 + x) * 4;
+            [
+                img_444.rgba[i],
+                img_444.rgba[i + 1],
+                img_444.rgba[i + 2],
+                img_444.rgba[i + 3],
+            ]
+        };
+        assert_eq!(p444(0, 0), [254, 0, 0, 255]);
+        assert_eq!(p444(14, 0), [0, 255, 1, 255]);
+        assert_eq!(p444(0, 8), [0, 0, 254, 255]);
+        assert_eq!(p444(14, 8), [255, 255, 255, 255]);
+
+        // 4:2:0 with DRI=1, 20x18 (2x2 = 4 16x16 MCUs, partial right & bottom edges).
+        let mcus_420 = vec![
+            vec![
+                make_dc(20),
+                make_dc(20),
+                make_dc(20),
+                make_dc(20),
+                make_dc(128),
+                make_dc(128),
+            ],
+            vec![
+                make_dc(90),
+                make_dc(90),
+                make_dc(90),
+                make_dc(90),
+                make_dc(128),
+                make_dc(128),
+            ],
+            vec![
+                make_dc(170),
+                make_dc(170),
+                make_dc(170),
+                make_dc(170),
+                make_dc(128),
+                make_dc(128),
+            ],
+            vec![
+                make_dc(240),
+                make_dc(240),
+                make_dc(240),
+                make_dc(240),
+                make_dc(128),
+                make_dc(128),
+            ],
+        ];
+        let jpeg_420_dri = build_baseline_jpeg(
+            20,
+            18,
+            &[(1, 2, 2, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
+            &mcus_420,
+            1,
+            false,
+        );
+        let img_420 = decode(&jpeg_420_dri).expect("4:2:0 multi-MCU with DRI must decode");
+        assert_eq!(img_420.width, 20);
+        assert_eq!(img_420.height, 18);
+        let p420 = |x: usize, y: usize| -> [u8; 4] {
+            let i = (y * 20 + x) * 4;
+            [
+                img_420.rgba[i],
+                img_420.rgba[i + 1],
+                img_420.rgba[i + 2],
+                img_420.rgba[i + 3],
+            ]
+        };
+        assert_eq!(p420(5, 5), [20, 20, 20, 255]);
+        assert_eq!(p420(19, 5), [90, 90, 90, 255]);
+        assert_eq!(p420(5, 17), [170, 170, 170, 255]);
+        assert_eq!(p420(19, 17), [240, 240, 240, 255]);
+
+        // Truncating 4:2:0 multi-MCU DRI stream anywhere before EOI must fail cleanly.
+        for cut in 1..jpeg_420_dri.len() {
+            assert!(
+                decode(&jpeg_420_dri[..cut]).is_err(),
+                "truncated 4:2:0 DRI JPEG at {cut}/{} must fail",
+                jpeg_420_dri.len()
+            );
+        }
+    }
+
+    #[test]
+    fn jpeg_rejects_corrupt_restart_markers_headers_and_pixel_limit_boundaries() {
+        let make_dc = |val: i32| -> [i32; 64] {
+            let mut b = [0i32; 64];
+            b[0] = (val - 128) * 8;
+            b
+        };
+
+        // 1. Corrupt restart marker sequence (flip RST0 -> RST1).
+        let mut bad_rst = build_baseline_jpeg(
+            16,
+            8,
+            &[(1, 1, 1, 0)],
+            &[vec![make_dc(50)], vec![make_dc(200)]],
+            1,
+            false,
+        );
+        let rst_pos = bad_rst
+            .windows(2)
+            .position(|w| w == [0xFF, 0xD0])
+            .expect("RST0 present");
+        bad_rst[rst_pos + 1] = 0xD1;
+        let err = decode(&bad_rst).expect_err("wrong restart marker must fail");
+        assert!(err.message.contains("restart marker"));
+
+        // 2. Boundary dimension bombs just above MAX_IMAGE_PIXELS (64_000_000).
+        for (w, h) in [(8_000u16, 8_001u16), (65_535u16, 977u16), (0u16, 8u16), (8u16, 0u16)] {
+            let mut hdr = vec![0xFF, 0xD8];
+            let mut sof0 = vec![8];
+            sof0.extend_from_slice(&h.to_be_bytes());
+            sof0.extend_from_slice(&w.to_be_bytes());
+            sof0.extend_from_slice(&[1, 1, 0x11, 0]);
+            push_marker_seg(&mut hdr, 0xC0, &sof0);
+            hdr.extend_from_slice(&[0xFF, 0xD9]);
+            assert!(
+                decode(&hdr).is_err(),
+                "dimensions {w}x{h} must be rejected"
+            );
+        }
+
+        // 3. Oversubscribed Huffman table in DHT.
+        let mut bad_dht = vec![0xFF, 0xD8];
+        let mut dht_payload = vec![0x00]; // class=0, id=0
+        dht_payload.push(3); // 3 codes of length 1 (max possible is 2!)
+        dht_payload.extend_from_slice(&[0u8; 15]);
+        dht_payload.extend_from_slice(&[0, 1, 2]);
+        push_marker_seg(&mut bad_dht, 0xC4, &dht_payload);
+        assert!(decode(&bad_dht).is_err());
+
+        // 4. Excessive MCU blocks (> 10) and non-divisible subsampling ratios in SOF0.
+        let mut too_many_blocks = vec![0xFF, 0xD8];
+        let mut sof0_12 = vec![8, 0, 16, 0, 16, 3];
+        sof0_12.extend_from_slice(&[1, 0x43, 0, 2, 0x11, 0, 3, 0x11, 0]); // 4*3 + 1 + 1 = 14 > 10
+        push_marker_seg(&mut too_many_blocks, 0xC0, &sof0_12);
+        assert!(decode(&too_many_blocks).is_err());
+
+        let mut bad_ratio = vec![0xFF, 0xD8];
+        let mut sof0_ratio = vec![8, 0, 16, 0, 16, 3];
+        sof0_ratio.extend_from_slice(&[1, 0x31, 0, 2, 0x21, 0, 3, 0x11, 0]); // 3 not divisible by 2
+        push_marker_seg(&mut bad_ratio, 0xC0, &sof0_ratio);
+        assert!(decode(&bad_ratio).is_err());
+
+        // 5. EOI before SOS.
+        assert!(decode(&[0xFF, 0xD8, 0xFF, 0xD9]).is_err());
+    }
 }

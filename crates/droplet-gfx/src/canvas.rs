@@ -1,6 +1,8 @@
 //! Software XRGB framebuffer and anti-aliased 2D rasterization primitives.
 
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
+use std::ptr::NonNull;
 
 use droplet_font::FontEngine;
 use droplet_image::DecodedImage;
@@ -8,12 +10,138 @@ use droplet_image::DecodedImage;
 use crate::color::Color;
 use crate::geometry::Rect;
 
+/// Pixel storage backing a [`Canvas`], either an owned heap buffer or a scoped external slice.
+#[derive(Debug)]
+pub enum PixelBuffer {
+    Owned(Vec<u32>),
+    External {
+        ptr: NonNull<u32>,
+        len: usize,
+        cap: usize,
+    },
+}
+
+impl PixelBuffer {
+    #[inline]
+    fn as_slice(&self) -> &[u32] {
+        match self {
+            Self::Owned(v) => v.as_slice(),
+            Self::External { ptr, len, .. } => {
+                if *len == 0 {
+                    &[]
+                } else {
+                    // SAFETY: `External` is only constructed inside `Canvas::with_external_slice*`
+                    // where the backing `&mut [u32]` outlives the scoped `Canvas` (cleared on drop).
+                    unsafe { std::slice::from_raw_parts(ptr.as_ptr(), *len) }
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [u32] {
+        match self {
+            Self::Owned(v) => v.as_mut_slice(),
+            Self::External { ptr, len, .. } => {
+                if *len == 0 {
+                    &mut []
+                } else {
+                    // SAFETY: `External` has exclusive access to the backing `&mut [u32]` for
+                    // the duration of `Canvas::with_external_slice*`.
+                    unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), *len) }
+                }
+            }
+        }
+    }
+
+    /// Resize and fill the pixel buffer, reusing external slice capacity without allocating when it fits.
+    pub fn resize(&mut self, new_len: usize, fill_px: u32) {
+        match self {
+            Self::Owned(v) => {
+                v.resize(new_len, fill_px);
+                v.fill(fill_px);
+            }
+            Self::External { ptr, len, cap } if new_len <= *cap => {
+                *len = new_len;
+                if new_len > 0 {
+                    // SAFETY: `new_len <= *cap` guarantees the slice lies within the external buffer.
+                    let slice = unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), new_len) };
+                    slice.fill(fill_px);
+                }
+            }
+            Self::External { .. } => {
+                *self = Self::Owned(vec![fill_px; new_len]);
+            }
+        }
+    }
+}
+
+impl Default for PixelBuffer {
+    fn default() -> Self {
+        Self::Owned(Vec::new())
+    }
+}
+
+impl Clone for PixelBuffer {
+    fn clone(&self) -> Self {
+        Self::Owned(self.as_slice().to_vec())
+    }
+}
+
+impl PartialEq for PixelBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for PixelBuffer {}
+
+impl From<Vec<u32>> for PixelBuffer {
+    fn from(v: Vec<u32>) -> Self {
+        Self::Owned(v)
+    }
+}
+
+impl Deref for PixelBuffer {
+    type Target = [u32];
+
+    #[inline]
+    fn deref(&self) -> &[u32] {
+        self.as_slice()
+    }
+}
+
+impl DerefMut for PixelBuffer {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [u32] {
+        self.as_mut_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a PixelBuffer {
+    type Item = &'a u32;
+    type IntoIter = std::slice::Iter<'a, u32>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut PixelBuffer {
+    type Item = &'a mut u32;
+    type IntoIter = std::slice::IterMut<'a, u32>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_mut_slice().iter_mut()
+    }
+}
+
 /// Row-major `0x00RRGGBB` pixel framebuffer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Canvas {
     pub width: usize,
     pub height: usize,
-    pub pixels: Vec<u32>,
+    pub pixels: PixelBuffer,
 }
 
 /// Alpha-blend `src` with additional `coverage` (`0..=255`) over an XRGB destination pixel.
@@ -277,8 +405,75 @@ impl Canvas {
         Self {
             width,
             height,
-            pixels: vec![bg.to_u32_xrgb(); len],
+            pixels: PixelBuffer::Owned(vec![bg.to_u32_xrgb(); len]),
         }
+    }
+
+    /// Render directly into a caller-provided external pixel slice after clearing it to `fill`.
+    ///
+    /// Uses a `Drop` guard so the external pointer never outlives `buf`, even on panic unwind.
+    pub fn with_external_slice<R>(
+        width: usize,
+        height: usize,
+        buf: &mut [u32],
+        fill: Color,
+        f: impl FnOnce(&mut Canvas) -> R,
+    ) -> R {
+        let needed = width.saturating_mul(height);
+        assert!(
+            buf.len() >= needed,
+            "external slice length {} is smaller than {}x{} ({needed})",
+            buf.len(),
+            width,
+            height
+        );
+        if needed > 0 {
+            buf[..needed].fill(fill.to_u32_xrgb());
+        }
+        Self::with_external_slice_unfilled(width, height, buf, f)
+    }
+
+    /// Render directly into a caller-provided external pixel slice while preserving existing pixels.
+    ///
+    /// Uses a `Drop` guard so the external pointer never outlives `buf`, even on panic unwind.
+    pub fn with_external_slice_unfilled<R>(
+        width: usize,
+        height: usize,
+        buf: &mut [u32],
+        f: impl FnOnce(&mut Canvas) -> R,
+    ) -> R {
+        let needed = width.saturating_mul(height);
+        assert!(
+            buf.len() >= needed,
+            "external slice length {} is smaller than {}x{} ({needed})",
+            buf.len(),
+            width,
+            height
+        );
+        struct ExternalCanvasGuard {
+            canvas: Canvas,
+        }
+        impl Drop for ExternalCanvasGuard {
+            fn drop(&mut self) {
+                self.canvas.width = 0;
+                self.canvas.height = 0;
+                self.canvas.pixels = PixelBuffer::Owned(Vec::new());
+            }
+        }
+        let cap = buf.len();
+        let ptr = NonNull::new(buf.as_mut_ptr()).unwrap_or_else(NonNull::dangling);
+        let mut guard = ExternalCanvasGuard {
+            canvas: Canvas {
+                width,
+                height,
+                pixels: PixelBuffer::External {
+                    ptr,
+                    len: needed,
+                    cap,
+                },
+            },
+        };
+        f(&mut guard.canvas)
     }
 
     #[inline]
@@ -295,7 +490,6 @@ impl Canvas {
         let len = width.saturating_mul(height);
         let fill_px = bg.to_u32_xrgb();
         self.pixels.resize(len, fill_px);
-        self.pixels.fill(fill_px);
     }
 
     /// Blend or fill the entire canvas with `color`.
@@ -1111,5 +1305,95 @@ mod tests {
             dot_bot + 2 >= h_bot && dot_bot <= h_bot + 3,
             "period bottom {dot_bot} should align near 'H' bottom {h_bot}"
         );
+    }
+
+    #[test]
+    fn external_slice_canvas_matches_owned_and_handles_resize_clone_and_unwind() {
+        let bg = Color::rgb(245, 247, 250);
+        let mut owned = Canvas::new(40, 30, bg);
+        let mut ext_buf = vec![0xDEAD_BEEFu32; 40 * 30];
+
+        let mut font_a = FontEngine::new();
+        let mut font_b = FontEngine::new();
+        let full = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 30.0,
+        };
+        let rect = Rect {
+            x: 4.0,
+            y: 4.0,
+            width: 24.0,
+            height: 16.0,
+        };
+
+        owned.fill_rounded_rect_clipped(rect, 4.0, full, Color::rgb(37, 99, 235));
+        owned.draw_text_aa(
+            &mut font_a,
+            6.0,
+            6.0,
+            "Hi",
+            Color::rgb(255, 255, 255),
+            12.0,
+            false,
+            false,
+            full,
+        );
+
+        let cloned_from_external = Canvas::with_external_slice(40, 30, &mut ext_buf, bg, |c| {
+            c.fill_rounded_rect_clipped(rect, 4.0, full, Color::rgb(37, 99, 235));
+            c.draw_text_aa(
+                &mut font_b,
+                6.0,
+                6.0,
+                "Hi",
+                Color::rgb(255, 255, 255),
+                12.0,
+                false,
+                false,
+                full,
+            );
+            assert!(matches!(c.pixels, PixelBuffer::External { .. }));
+            c.clone()
+        });
+
+        assert_eq!(ext_buf.as_slice(), &*owned.pixels);
+        assert!(matches!(cloned_from_external.pixels, PixelBuffer::Owned(_)));
+        assert_eq!(cloned_from_external, owned);
+
+        // Unfilled preserves prior pixels outside drawn sub-region, and resize within capacity stays External.
+        let mut preserve_buf = vec![0x0011_2233u32; 30 * 20];
+        Canvas::with_external_slice_unfilled(20, 10, &mut preserve_buf, |c| {
+            c.fill_rect(
+                Rect {
+                    x: 2.0,
+                    y: 2.0,
+                    width: 4.0,
+                    height: 4.0,
+                },
+                Color::rgb(255, 0, 0),
+            );
+            assert_eq!(c.pixels[0], 0x0011_2233);
+            assert_eq!(c.pixels[2 * 20 + 2], 0x00FF_0000);
+
+            // Resize within cap (30*20 >= 25*12) reuses External buffer without reallocating.
+            c.resize(25, 12, Color::rgb(1, 2, 3));
+            assert!(matches!(c.pixels, PixelBuffer::External { .. }));
+            assert_eq!(c.pixels.len(), 25 * 12);
+            assert_eq!(c.pixels[0], 0x0001_0203);
+        });
+        assert_eq!(preserve_buf[0], 0x0001_0203);
+
+        // Unwind safety: panic inside closure still cleanly drops the guard.
+        let mut panic_buf = vec![0u32; 16];
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Canvas::with_external_slice(4, 4, &mut panic_buf, Color::rgb(10, 20, 30), |c| {
+                c.pixels[0] = 0x00AA_BBCC;
+                panic!("simulated panic");
+            });
+        }));
+        assert!(res.is_err());
+        assert_eq!(panic_buf[0], 0x00AA_BBCC);
     }
 }

@@ -40,6 +40,7 @@ pub struct CompoundSelector {
     pub universal: bool,
     pub hover: bool,
     pub active: bool,
+    pub focus: bool,
     pub unsupported_pseudo: bool,
 }
 
@@ -68,6 +69,9 @@ impl ComplexSelector {
                 b += 1;
             }
             if compound.active {
+                b += 1;
+            }
+            if compound.focus {
                 b += 1;
             }
             if compound.tag_name.is_some() {
@@ -454,6 +458,8 @@ impl<'a> Parser<'a> {
                             sel.hover = true;
                         } else if ident.eq_ignore_ascii_case("active") {
                             sel.active = true;
+                        } else if ident.eq_ignore_ascii_case("focus") {
+                            sel.focus = true;
                         } else {
                             sel.unsupported_pseudo = true;
                         }
@@ -1018,6 +1024,24 @@ mod tests {
         assert_eq!(sels[2].specificity(), (0, 1, 0));
         assert!(sels[2].parts[0].1.active);
         assert!(!sels[2].parts[0].1.hover);
+    }
+
+    #[test]
+    fn test_focus_pseudo_selector_specificity_and_utf8() {
+        let ss = parse("input:focus, button:focus:hover, :Focus { border-color: #2563eb; }");
+        assert_eq!(ss.rules.len(), 1);
+        let sels = &ss.rules[0].selectors;
+        assert_eq!(sels[0].specificity(), (0, 1, 1));
+        assert!(sels[0].parts[0].1.focus);
+        assert_eq!(sels[1].specificity(), (0, 2, 1));
+        assert!(sels[1].parts[0].1.focus);
+        assert!(sels[1].parts[0].1.hover);
+        assert!(sels[2].parts[0].1.focus);
+        assert!(!sels[2].parts[0].1.unsupported_pseudo);
+        assert!(!sels[0].parts[0].1.unsupported_pseudo);
+
+        let cyr = parse("textarea:focus { color: #0f172a; } /* Кириллица */");
+        assert!(cyr.rules[0].selectors[0].parts[0].1.focus);
     }
 
     #[test]

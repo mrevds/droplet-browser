@@ -1,3 +1,4 @@
+use droplet_storage::Store;
 use droplet_url::Url;
 
 use crate::Response;
@@ -8,6 +9,16 @@ pub(crate) fn fetch_about(url: &Url) -> Response {
         "roadmap" => (200, about_roadmap_html()),
         "architecture" => (200, about_architecture_html()),
         "test" => (200, about_test_html()),
+        "history" => {
+            let store = Store::from_env();
+            (200, crate::user_pages::history_page(&store.recent_history(200)))
+        }
+        "bookmarks" => {
+            let store = Store::from_env();
+            let bookmarks = store.bookmarks();
+            let recent: Vec<_> = bookmarks.iter().rev().take(200).cloned().collect();
+            (200, crate::user_pages::bookmarks_page(&recent))
+        }
         "blank" => (200, about_blank_html()),
         other => (404, about_not_found_html(other)),
     };
@@ -20,7 +31,7 @@ pub(crate) fn fetch_about(url: &Url) -> Response {
     }
 }
 
-const ABOUT_BASE_CSS: &str = r#"
+pub(crate) const ABOUT_BASE_CSS: &str = r#"
 body {
   background-color: #f4f7fb;
   color: #162032;
@@ -205,7 +216,7 @@ hr {
 }
 "#;
 
-fn about_nav_html(active: &str) -> String {
+pub(crate) fn about_nav_html(active: &str) -> String {
     format!(
         "<div class=\"nav\">\
          <span class=\"brand\">Droplet Engine</span>\
@@ -214,6 +225,8 @@ fn about_nav_html(active: &str) -> String {
          <a href=\"about:roadmap\">Roadmap{r}</a>\
          <a href=\"about:architecture\">Architecture{a}</a>\
          <a href=\"about:test\">Visual Test{t}</a>\
+         <a href=\"about:history\">History{hi}</a>\
+         <a href=\"about:bookmarks\">Bookmarks{b}</a>\
          <a href=\"about:blank\">Blank</a>\
          </div>\
          </div>",
@@ -221,6 +234,8 @@ fn about_nav_html(active: &str) -> String {
         r = if active == "roadmap" { " *" } else { "" },
         a = if active == "architecture" { " *" } else { "" },
         t = if active == "test" { " *" } else { "" },
+        hi = if active == "history" { " *" } else { "" },
+        b = if active == "bookmarks" { " *" } else { "" },
     )
 }
 
@@ -515,6 +530,8 @@ fn about_not_found_html(page: &str) -> String {
       <li><a href="about:roadmap">about:roadmap</a></li>
       <li><a href="about:architecture">about:architecture</a></li>
       <li><a href="about:test">about:test</a></li>
+      <li><a href="about:history">about:history</a></li>
+      <li><a href="about:bookmarks">about:bookmarks</a></li>
       <li><a href="about:blank">about:blank</a></li>
     </ul>
   </div>

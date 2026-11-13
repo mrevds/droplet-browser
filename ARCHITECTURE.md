@@ -1,56 +1,59 @@
 # Droplet Engine Architecture
 
 **Droplet** is a zero-bloat graphical web browser engine written from scratch in pure Rust (`edition = "2021"`).  
-`Cargo.toml` keeps `[dependencies]` **completely empty**—zero external crates, zero async runtimes, and zero build-time C/C++ toolchains. OS integration relies strictly on Rust `std` plus runtime dynamic library loading (`dlopen` on Linux for `libX11.so.6` and `libssl.so.4`/`.3`/`.so`, Win32 API / `StretchDIBits` on Windows, and an architectural `macos.rs` stub).
+All workspace `[dependencies]` stay **completely empty** of external crates—zero async runtimes, zero proc-macro graphs, and zero build-time C/C++ toolchains. OS integration relies strictly on Rust `std` plus runtime dynamic library loading (`dlopen` on Linux for `libX11.so.6`, `libXext.so.6`, `libwayland-client.so.0`, and `libssl.so.4`/`.3`/`.so`), Win32/Schannel/GDI FFI on Windows, and Objective-C/CoreGraphics FFI on macOS.
 
 ---
 
 ## End-to-End Rendering Pipeline
 
 ```text
-  Input URL / CLI / Click / Tab Switch
+  Input URL / CLI / Click / Tab Switch / JS Event
            │
            ▼
    [1] crates/droplet-url/src/lib.rs          Url::parse / Url::resolve (http://, https://, file://, about:*)
            │
            ▼
    [2] crates/droplet-net/src/adblock.rs      TrackerFilter::should_block (zero-alloc domain/suffix check before DNS/TCP)
-     + crates/droplet-net/src/lib.rs          DNS TTL cache -> HTTP/1.1 + Keep-Alive pool -> OpenSSL TLS (Linux)
-                           fetch_many (4-worker std::thread pool) / fetch_uri_bytes (data:, file:, http(s):)
+     + crates/droplet-net/src/{lib,tls,tls_schannel}.rs
+                                              DNS TTL cache -> HTTP/1.1 Keep-Alive pool -> OpenSSL (Linux) / Schannel (Windows)
+                                              fetch_many (4-worker std::thread pool) / fetch_uri_bytes (data:, file:, http(s):)
+                                              Built-in about:* & generated about:history / about:bookmarks pages
            │
            ▼
-   [3] crates/droplet-dom/src/html.rs         html::parse (iterative UTF-8-safe stack parser)
+   [3] crates/droplet-dom/src/{html,arena,query}.rs
+                                              html::parse -> Arena Document (Vec<Node>, NodeId = usize, Vec<(String, String)> attrs)
+                                              Iterative DOM mutation APIs & CSS selector queries (query_selector / query_selector_all)
            │
            ▼
-   [4] crates/droplet-dom/src/arena.rs          Document / NodeId arena (Vec<Node>, Vec<(String, String)> attributes)
-                           collect_style_text() & collect_stylesheet_links()
+   [4] crates/droplet-js/src/                 Bytecode VM + DomHost bindings (<script> execution, timers, events,
+     + crates/droplet-shell/src/js.rs         document.getElementById / querySelector / classList / style / ShellDomHost)
            │
            ▼
-   [5] crates/droplet-image/src/lib.rs        image::decode -> DecodedImage (pure-Rust PNG/BMP/PPM/SVG, 64M-px guard)
+   [5] crates/droplet-image/src/              image::decode -> DecodedImage (pure-Rust PNG, baseline JPEG, BMP, PPM, SVG;
+                                              64M-px dimension-bomb guard)
            │
            ▼
-   [6] crates/droplet-style/src/css.rs          css::parse / parse_inline_style (Flexbox, %/em/rem/vh/vw, :hover/:active)
+   [6] crates/droplet-style/src/              css::parse -> style_tree_with_context (Copy ComputedStyle, zero HashMap, StyleContext)
            │
            ▼
-   [7] crates/droplet-style/src/cascade.rs        style_tree_with_context (Copy ComputedStyle, zero HashMap, StyleContext)
+   [7] crates/droplet-layout/src/             layout_tree (Block, Inline, InlineBlock, 2-pass Flexbox, <img>, HTML form controls)
+                                              hit_test / hit_test_href / hit_test_node
            │
            ▼
-   [8] crates/droplet-layout/src/lib.rs       layout_tree (Block, Inline, InlineBlock, 2-pass Flexbox, <img> replaced)
-                           hit_test / hit_test_href / hit_test_node
+   [8] crates/droplet-paint/src/              build_display_list -> DisplayList -> render_frame_damaged -> Canvas / External Slice
+     + crates/droplet-font/src/               FontEngine (Linux/Windows TTF discovery, pure-Rust sfnt/glyf AA,
+                                              bounded GlyphAtlas max 4096 entries, 8x16 bitmap fallback)
            │
-           ▼
-   [9] crates/droplet-paint/src/lib.rs        build_display_list -> DisplayList -> render_frame -> Canvas
-     + crates/droplet-font/src/lib.rs         FontEngine (Linux/Windows TTF discovery, pure-Rust sfnt/glyf AA,
-                           bounded GlyphAtlas max 4096 entries, 8x16 bitmap fallback)
-           │
-           ├──────────────────────────────────────────┐
-           ▼                                          ▼
-  [10a] crates/droplet-platform/src/                        [10b] Headless CLI (apps/droplet-desktop/src/main.rs)
-        mod.rs -> linux_x11.rs / windows.rs        --dump-dom / --dump-layout / --screenshot
-        (window.rs compatibility alias)
+           ├──────────────────────────────────────────────────────┐
+           ▼                                                      ▼
+  [9a] crates/droplet-platform/src/                        [9b] CLI & Multi-Process Sandbox (`apps/droplet-desktop/`)
+       lib.rs -> linux_wayland / linux_x11 /                    --dump-dom / --dump-layout / --screenshot
+                 windows / macos + clipboard                    --sandbox-screenshot -> RendererHost <-> --renderer child
+                                                                (crates/droplet-ipc + crates/droplet-sandbox + HeadlessRenderer)
 ```
 
-The orchestration layer (`crates/droplet-shell/src/lib.rs` -> `Browser`) manages multi-tab `TabState` slots, automatic **Tab Hibernation** past `MAX_WARM_TABS = 3`, per-tab navigation history (`back_stack` / `forward_stack`), concurrent external CSS and `<img>` fetching, scroll offsets, URL editing state, cached `LayoutBox` / `DisplayList`, and dirty repaint flags (`needs_repaint`).
+The orchestration layer (`crates/droplet-shell/src/` -> `Browser`) manages multi-tab `TabState` slots, automatic **Tab Hibernation** past `MAX_WARM_TABS = 3`, persistent history/bookmarks (`crates/droplet-storage`), interactive HTML forms & selection, Find-in-Page, Box Model Inspector, reactive `TabJsState` + `DirtyFlags` incremental style/layout/display-list rebuilds, and `DamageRect` partial-surface dirty tracking.
 
 ---
 
@@ -69,111 +72,89 @@ The orchestration layer (`crates/droplet-shell/src/lib.rs` -> `Browser`) manages
 - Performs **zero heap allocations** on the hot check path and executes **before** DNS lookup or `TcpStream` connect so blocked tracker/ad subresources never open sockets or burn CPU/bandwidth.
 - Label-boundary safe (`notdoubleclick.net` is not matched by `doubleclick.net`).
 
-### 3. Transport, Pooling, TLS & Built-in Pages (`crates/droplet-net/src/lib.rs`)
-- `Response`: `{ url: Url, status: u16, content_type: String, body: String }`
-- `NetError`: `{ message: String }`
-- **Public API:** `fetch`, `fetch_with_filter`, `fetch_many`, `fetch_many_with_filter`, `fetch_bytes`, `fetch_uri_bytes` (handles `data:` URIs + resolved `file:`/`http:`/`https:` URLs), plus pure testable parsers `parse_http_response` and `decode_chunked`.
-- **Caching & Pooling (`NET_STATE`):**
+### 3. Transport, Pooling, TLS & Built-in Pages (`crates/droplet-net/src/`)
+- `Response`: `{ url: Url, status: u16, content_type: String, body: String }`, `NetError`: `{ message: String }`.
+- **Public API:** `fetch`, `fetch_with_filter`, `fetch_many`, `fetch_many_with_filter`, `fetch_bytes`, `fetch_uri_bytes` (`data:`, `file:`, `http:`, `https:`), plus pure parsers `parse_http_response` and `decode_chunked`.
+- **Caching & Pooling (`dns.rs`, `pool.rs`):**
   - **DNS cache:** `(host, port) -> DnsEntry` with `DNS_TTL = 60s` and `DNS_CACHE_MAX_ENTRIES = 256`.
-  - **HTTP/1.1 Keep-Alive connection pool:** keyed by `(SchemeKey, host, port)` with `POOL_IDLE_TTL = 30s`, `POOL_MAX_PER_ORIGIN = 4`, and `POOL_MAX_TOTAL = 32`. Reads framed `Content-Length` and incremental `Transfer-Encoding: chunked` bodies without waiting for EOF, and transparently retries once on stale pooled sockets.
-- **TLS (`https://`):**
+  - **HTTP/1.1 Keep-Alive connection pool:** keyed by `(SchemeKey, host, port)` with `POOL_IDLE_TTL = 30s`, `POOL_MAX_PER_ORIGIN = 4`, and `POOL_MAX_TOTAL = 32`. Reads framed `Content-Length` and incremental `Transfer-Encoding: chunked` bodies, retrying once on stale pooled sockets.
+- **TLS (`tls.rs`, `tls_schannel.rs`):**
   - On **Linux**, `tls::TlsStream` dynamically loads `libssl.so.4`, `libssl.so.3`, or `libssl.so` at runtime via `dlopen`, configures system CA verification (`SSL_CTX_set_default_verify_paths` + `SSL_VERIFY_PEER`), sets SNI (`SSL_set_tlsext_host_name`), and verifies the peer hostname (`SSL_set1_host` + `SSL_get_verify_result`).
-  - On **non-Linux targets** (Windows/macOS), `tls::TlsStream` returns a descriptive `NetError` pending native Schannel/system TLS implementation (`DROP-011`).
+  - On **Windows**, `tls_schannel::TlsStream` uses native Win32 **Schannel** (`secur32.dll` / `crypt32.dll`: `AcquireCredentialsHandleW`, `InitializeSecurityContextW`, `QueryContextAttributesW`, `EncryptMessage` / `DecryptMessage`, `FreeCredentialsHandle`) with system certificate trust and SNI—without OpenSSL.
+  - On unsupported targets, `tls::TlsStream::connect` returns a descriptive `NetError`.
 - **Concurrency & Limits:** `fetch_many` uses a bounded `std::thread::scope` pool (`MAX_CONCURRENT_FETCHES = 4`); enforces `HTTP_TIMEOUT = 5s`, `MAX_REDIRECTS = 5`, `MAX_HEADER_BYTES = 64 KiB`, and `MAX_RESPONSE_BYTES = 16 MiB`.
+- **Built-in & User Pages (`about.rs`, `user_pages.rs`):** `about:droplet`, `about:roadmap`, `about:architecture`, `about:test`, `about:blank`, plus dynamic HTML views for `about:history` and `about:bookmarks`.
 
-### 4. Pure-Rust Image Decoder (`crates/droplet-image/src/lib.rs`)
-- `DecodedImage`: `{ pub width: u32, pub height: u32, pub rgba: Vec<u8> }` (row-major RGBA8).
-- `ImageError`: `{ pub message: String }`.
+### 4. Pure-Rust Image Decoder (`crates/droplet-image/src/`)
+- `DecodedImage`: `{ pub width: u32, pub height: u32, pub rgba: Vec<u8> }` (row-major RGBA8); `ImageError`: `{ pub message: String }`.
 - `decode(&[u8]) -> Result<DecodedImage, ImageError>` sniffs magic bytes and decodes in pure Rust (zero external crates):
-  - **PNG:** full chunk reader, DEFLATE/zlib inflate, all 5 scanline predictors (`None`/`Sub`/`Up`/`Average`/`Paeth`), Adam7 interlacing, grayscale/RGB/RGBA/indexed `PLTE` + `tRNS`.
-  - **BMP:** uncompressed/RLE headers into RGBA8.
-  - **PPM:** ASCII `P3` and binary `P6`.
-  - **Static SVG:** XML preamble + `<svg>` (`viewBox`, `<rect>`, `<circle>`, `<line>`, `<polygon>`, `<path>` fill/stroke rasterization).
-  - **JPEG:** cleanly rejected (`unsupported image format: JPEG`) pending `DROP-011` baseline JPEG decoder.
+  - **PNG (`png.rs`, `deflate.rs`):** full chunk reader, DEFLATE/zlib inflate, all 5 scanline predictors (`None`/`Sub`/`Up`/`Average`/`Paeth`), Adam7 interlacing, grayscale/RGB/RGBA/indexed `PLTE` + `tRNS`.
+  - **Baseline JPEG (`jpeg.rs`):** baseline DCT (`SOF0`) decoder supporting Huffman tables (`DHT`), quantization tables (`DQT`), grayscale and `4:2:0` / `4:4:4` chroma subsampling, `DRI` restart intervals, YCbCr -> RGBA8 conversion, clean rejection of progressive `SOF2` streams, and truncation checks.
+  - **BMP (`bmp.rs`), PPM (`ppm.rs`):** uncompressed/RLE BMP and ASCII `P3` / binary `P6` PPM.
+  - **Static SVG (`svg.rs`):** XML preamble + `<svg>` (`viewBox`, `<rect>`, `<circle>`, `<line>`, `<polygon>`, `<path>` fill/stroke rasterization).
 - **Dimension Bomb Guard:** `validate_dimensions` enforces `width * height <= MAX_IMAGE_PIXELS` (`64_000_000`) and checked byte-size math before allocating `Vec<u8>`.
 
-### 5. Arena DOM (`crates/droplet-dom/src/arena.rs`) & HTML Parser (`crates/droplet-dom/src/html.rs`)
-- `NodeId = usize`
-- `ElementData`: `{ pub tag_name: String, pub attributes: Vec<(String, String)> }` with `id()`, `classes()`, `has_class()`, `attr()`. Storing attributes in a flat `Vec` instead of `HashMap` incurs **zero heap allocation** on attribute-less elements (`<p>`, `<span>`, `<div>`, `<li>`, etc.).
-- `NodeKind`: `Document | Element(ElementData) | Text(String)`
-- `Node`: `{ id: NodeId, parent: Option<NodeId>, children: Vec<NodeId>, kind: NodeKind }`
-- `Document`: `{ nodes: Vec<Node> }` where `nodes[0]` is always `NodeKind::Document`.
-- Iterative `Vec`-stack traversals (zero recursion): `text_content`, `collect_style_text`, `collect_stylesheet_links` (`<link rel="stylesheet" href="...">` in document order), `find_title`, `find_first_tag`, `dump_tree`.
+### 5. Arena DOM, HTML Parser & Selector Engine (`crates/droplet-dom/src/`)
+- `NodeId = usize`; `ElementData`: `{ pub tag_name: String, pub attributes: Vec<(String, String)> }`. Storing attributes in a flat `Vec` instead of `HashMap` incurs **zero heap allocation** on attribute-less elements.
+- `NodeKind`: `Document | Element(ElementData) | Text(String)`; `Document`: `{ nodes: Vec<Node> }` with `nodes[0]` always `NodeKind::Document`.
+- Iterative `Vec`-stack traversals (zero recursion): `text_content`, `text_content_of`, `set_text_content_of`, `collect_style_text`, `collect_stylesheet_links`, `collect_script_sources`, `find_title`, `find_first_tag`, `dump_tree`.
+- Live DOM mutation & query (`arena.rs`, `query.rs`): iterative `append_child` (with ancestor cycle check and reparenting), `remove_child`, `set_inner_html_fragment` / `serialize_inner_html`, `class_list_*`, `style_prop_get` / `style_prop_set` (`camelCase` <-> `kebab-case`), and iterative `get_element_by_id` / `query_selector` / `query_selector_all` (tag, `#id`, `.class`, `[attr]`, comma lists, descendant & `>` child combinators).
 - `html::parse(&str) -> Document`: iterative UTF-8-safe HTML5-style stack parser handling `<!DOCTYPE>`, comments, void tags, self-closing tags, raw text (`<style>`, `<script>`), HTML entities, and implicit auto-closing rules.
 
-### 6. CSS Parser (`crates/droplet-style/src/css.rs`) & Style Tree (`crates/droplet-style/src/cascade.rs`)
-- **CSS Parser (`crates/droplet-style/src/css.rs`):**
-  - `Color`: `{ r: u8, g: u8, b: u8, a: u8 }` (`to_u32_xrgb`, `from_name_or_hex`).
-  - `Unit`: `Px | Percent | Em | Rem | Vh | Vw`.
-  - `Value`: `Keyword(String) | Length(f32, Unit) | Color(Color) | Number(f32)`.
-  - `CompoundSelector`: `{ tag_name, id, classes, universal, hover, active, unsupported_pseudo }` — `:hover` and `:active` each count in the class specificity bucket `(0, 1, 0)`.
-  - `ComplexSelector` (`Descendant` / `Child` combinators), `Rule`, `Stylesheet`.
-- **Style Tree (`crates/droplet-style/src/cascade.rs`):**
+### 6. Embedded JavaScript VM & Reactive DOM (`crates/droplet-js/src/`, `crates/droplet-shell/src/js.rs`)
+- **Pure-Rust Bytecode VM (`crates/droplet-js`):** lexer (`lexer.rs`), recursive-descent AST parser (`parser.rs`, `ast.rs`), bytecode compiler (`compiler.rs`, `bytecode.rs`), and stack VM (`vm.rs`) supporting variables (`let`/`const`/`var`), functions & closures, objects, arrays, host bindings (`HostBinding`), `console.log`, and `setTimeout` / `clearTimeout` / `setInterval` timers.
+- **DOM Bridge (`dom.rs` + `ShellDomHost`):** exposes `DomNodeId`, `DomHost`, `DomEventInput`, `DomEventOutcome`, `MAX_DOM_LISTENERS = 1024`, `MAX_SCRIPTS_PER_PAGE = 32`, and `MAX_JS_LOG_ENTRIES = 256` across `document`, `window`, element wrappers (cached by `Rc` identity), `textContent`, `innerHTML`, `classList`, `style`, `value`, `checked`, `focus()`/`blur()`, and bubbling DOM event dispatch (`click`, `input`, `change`, `submit`, `keydown`, `keyup`) with `preventDefault()` and `stopPropagation()`.
+- **Incremental Dirty Tracking (`crates/droplet-shell/src/tab.rs`):** `DirtyFlags` separates `paint`, `style_and_layout`, and `title_changed` so paint-only mutations avoid full relayout, tracked via `layout_rebuilds` and `display_list_rebuilds`.
+
+### 7. CSS Parser & Style Tree (`crates/droplet-style/src/`)
+- **CSS Parser (`css.rs`):** `Color`, `Unit` (`Px | Percent | Em | Rem | Vh | Vw`), `Value`, `CompoundSelector` (`tag_name`, `id`, `classes`, `universal`, `hover`, `active`), `ComplexSelector` (`Descendant` / `Child`), `Rule`, `Stylesheet`.
+- **Style Tree (`cascade.rs`, `computed.rs`):**
   - `Display`: `Block | Inline | InlineBlock | Flex | None`.
-  - Flexbox enums: `FlexDirection`, `FlexWrap`, `JustifyContent`, `AlignItems`, `FlexBasis`.
-  - `ComputedStyle`: derives `Copy` and contains **zero `HashMap`s** or heap allocations—only typed scalar/enum/edge fields (`display`, `color`, `background_color`, `border_color`, `margin`, `padding`, `border`, `border_radius`, `width`/`width_pct`, `max_width`/`max_width_pct`, `height`/`height_pct`, `font_size`, `bold`, `monospace`, `text_underline`, `margin_left_auto`, `margin_right_auto`, `preformatted`, and Flexbox properties).
-  - `StyleContext`: `{ viewport_width: f32, viewport_height: f32, hovered_node: Option<NodeId>, active_node: Option<NodeId> }` enables accurate `vh`/`vw` resolution and ancestor-propagated `:hover`/`:active` matching.
-  - `stylesheet_uses_interaction(&Stylesheet) -> bool`: fast pre-check allowing `Browser` to skip restyle/relayout on mouse motion when a page has no `:hover` or `:active` rules.
+  - `ComputedStyle`: derives `Copy` with **zero `HashMap`s** or heap allocations—only typed scalar/enum/edge fields including Flexbox properties.
+  - `StyleContext`: `{ viewport_width, viewport_height, hovered_node, active_node }` for `vh`/`vw` and `:hover`/`:active` matching; `stylesheet_uses_interaction` skips restyle/relayout on mouse motion for static pages.
 
-### 7. Box Layout Engine (`crates/droplet-layout/src/lib.rs`)
-- `Rect` / `Dimensions` (`content`, `padding`, `border`, `margin`).
-- `BoxType`: `Block | Inline | InlineBlock | Flex | AnonymousBlock | Text { lines, line_height, font_size, font_scale, monospace } | Image { image: Option<Arc<DecodedImage>>, alt: String }`.
-- `LayoutBox`: `{ node_id: Option<NodeId>, dimensions, box_type, style, href, children }`.
-- `layout_tree(doc, styled_root, viewport_width, viewport_height, images)`:
-  - Resolves block widths, auto margins, percentages, and vertical flow.
-  - Wraps inline text and atomic `InlineBlock` boxes across line boxes using `font::measure_text_px`.
-  - Runs a **2-pass Flexbox layout** (`FlexDirection::{Row, Column, RowReverse, ColumnReverse}`, `FlexWrap`, `JustifyContent`, `AlignItems`, `gap`, `flex_grow`, `flex_shrink` clamped non-negative, `flex_basis`).
-  - Lays out `<img>` as replaced boxes preserving intrinsic aspect ratio when one dimension is specified, or rendering an `alt`-text placeholder box on decode/load failure.
-- Hit testing: `hit_test`, `hit_test_href`, and `hit_test_node` (returns deepest `NodeId` under pointer for `:hover`/`:active`).
+### 8. Box Layout Engine & Forms (`crates/droplet-layout/src/`)
+- `Rect` / `Dimensions` (`content`, `padding`, `border`, `margin`), `BoxType`, `LayoutBox`.
+- `layout_tree` resolves block widths, auto margins, percentages, inline text wrapping via `font::measure_text_px`, atomic `InlineBlock`, **2-pass Flexbox layout** (`block.rs`, `inline.rs`, `flex.rs`), `<img>` replaced boxes (`replaced.rs`), and HTML form controls (`forms.rs`: `<input type="text|password|checkbox|radio|submit">`, `<textarea>`, `<button>`, `<select>` via `ControlKind` / `ControlBox`).
+- Hit testing (`hit_test.rs`): `hit_test`, `hit_test_href`, and `hit_test_node` (returns deepest `NodeId` under pointer).
 
-### 8. Font Rasterizer (`crates/droplet-font/src/lib.rs`) & Display List Paint (`crates/droplet-paint/src/lib.rs`)
-- **Typography (`crates/droplet-font/src/lib.rs`):**
-  - `FontEngine` backed by process-wide `SYSTEM_FONTS` (`OnceLock<Arc<FontSet>>`).
-  - Discovers system TrueType fonts on **Linux** (`/usr/share/fonts/truetype/ubuntu/...`, `dejavu/...`, `liberation/...`, `noto/...`) and **Windows** (`C:\Windows\Fonts\segoeui.ttf`, `arial.ttf`, `consola.ttf`, `cour.ttf`).
-  - Pure-Rust `sfnt`/`glyf` table parser (`head`, `maxp`, `cmap` format 4/12, `hhea`, `hmtx`, `loca`, `glyf` simple + compound glyphs up to `MAX_COMPOUND_DEPTH = 8`) and anti-aliased scanline rasterizer.
-  - Bounded `GlyphAtlas` cache (`HashMap<GlyphCacheKey, RasterGlyph>`) capped at `MAX_ATLAS_ENTRIES = 4096` entries.
-  - Automatic per-glyph fallback to secondary system fonts (e.g. `DejaVuSans.ttf` for Cyrillic) and the built-in `8x16` monochrome bitmap font (`GLYPH_WIDTH = 8`, `GLYPH_HEIGHT = 16`).
-- **Display List & Chrome (`crates/droplet-paint/src/lib.rs`):**
-  - Minimalist browser chrome constants: `TAB_BAR_HEIGHT = 30`, `TOOLBAR_HEIGHT = 44`, `CHROME_HEIGHT = 74`, `STATUS_BAR_HEIGHT = 0`.
-  - `DisplayCommand`: `SolidRect { rect, color, radius }`, `Text { x, y, text, color, font_size, scale, bold, monospace, underline, width }`, `Image { rect, image }`.
-  - `render_frame` performs O(1) vertical viewport culling over `DisplayList`, draws SDF anti-aliased rounded rectangles (`fill_rounded_rect_clipped`, `draw_rounded_outline_clipped`), alpha-blended TrueType glyphs, RGBA images (`draw_image_clipped`), a floating scrollbar thumb, the top tab strip + toolbar + timing pill, and a **floating bottom-left hover URL pill** (`draw_floating_status_pill`) without dedicating a permanent bottom bar.
+### 9. Graphics, Font Rasterizer & Display List Paint (`crates/droplet-gfx/`, `crates/droplet-font/`, `crates/droplet-paint/`)
+- **Graphics & Damage (`crates/droplet-gfx/src/`):** row-major `0x00RRGGBB` `Canvas` backed by `PixelBuffer::Owned(Vec<u32>)` or `PixelBuffer::External` via `Canvas::with_external_slice` / `Canvas::with_external_slice_unfilled` (panic-unwind safe `Drop` guard), plus integer pixel-aligned `DamageRect` (`new`, `full`, `clamp`, `union`, `intersect`).
+- **Typography (`crates/droplet-font/src/`):** `FontEngine` backed by `SYSTEM_FONTS` (`OnceLock<Arc<FontSet>>`), discovering Linux/Windows system TrueType fonts, parsing `sfnt`/`glyf` tables, caching rasterized alpha glyphs in a bounded `GlyphAtlas` (`MAX_ATLAS_ENTRIES = 4096`), and falling back to Cyrillic-capable secondary fonts and an `8x16` bitmap font (`GLYPH_WIDTH = 8`, `GLYPH_HEIGHT = 16`).
+- **Display List, Chrome & Overlays (`crates/droplet-paint/src/`):**
+  - Chrome constants: `TAB_BAR_HEIGHT = 30`, `TOOLBAR_HEIGHT = 44`, `CHROME_HEIGHT = 74`, `STATUS_BAR_HEIGHT = 0`.
+  - `render_frame_damaged` clips chrome, viewport, status pill, find bar (`tools_overlay.rs`), form focus/selection/control visuals (`forms_overlay.rs`), and Box Model Inspector overlay (`BoxModelOverlay`) to `DamageRect`.
 
-### 9. Browser Session (`crates/droplet-shell/src/lib.rs`) & Cross-Platform Windowing (`crates/droplet-platform/src/`)
-- `Browser` owns `Vec<TabState>`, `active_tab`, `MAX_WARM_TABS = 3`, `FontEngine` / viewport size, pointer state `(mouse_x, mouse_y, mouse_down)`, and `needs_repaint`.
-  - **Multi-Tab & Tab Hibernation:** Each `TabState` holds its URL, title, `back_stack`, `forward_stack`, `scroll_y`, and optional warm render payload (`Document`, `Stylesheet`, `LayoutBox`, `DisplayList`, decoded image map). When active + recent warm tabs exceed `MAX_WARM_TABS = 3`, the oldest inactive background tabs are hibernated (dropping parsed DOM, layout tree, display list, and decoded images while retaining URL/title/history) and transparently reloaded when switched back to.
-  - **Concurrent Subresource Loading:** Collects `<link rel="stylesheet">` via `doc.collect_stylesheet_links()` and `<img src="...">` URIs, resolving and fetching them concurrently via `net::fetch_many` / `net::fetch_uri_bytes` before running `style_tree_with_context` + `layout_tree` + `build_display_list`.
-  - **Zero-Waste Interaction:** Mouse motion updates `hovered_node` via `layout::hit_test_node` and only triggers restyle/relayout/repaint if `hovered_node` changed **and** `stylesheet_uses_interaction(&stylesheet)` is true.
-- **Cross-Platform Windowing (`crates/droplet-platform/src/`):**
-  - `crates/droplet-platform/src/lib.rs` defines the `PlatformApp`/`NavKey` contract and dispatches `run(app)` by `#[cfg(target_os = ...)]`.
-  - `crates/droplet-platform/src/linux_x11.rs`: runtime `dlopen("libX11.so.6")`, blocking `XNextEvent` loop, batched expose/motion/configure handling, `XCreateImage` + `XPutImage` blit.
-  - `crates/droplet-platform/src/linux_wayland.rs`: runtime `dlopen("libwayland-client.so.0")`, hand-written xdg-shell + `wl_shm` client, automatic fallback to X11.
-  - `crates/droplet-platform/src/windows.rs`: Win32 `CreateWindowExW` / `GetMessageW` event loop + `StretchDIBits` XRGB framebuffer presentation.
-  - `crates/droplet-platform/src/macos.rs`: native Cocoa/`CGContext` implementation when built on macOS with the Apple SDK.
+### 10. Browser Session, Storage & Cross-Platform Windowing (`crates/droplet-storage/`, `crates/droplet-shell/`, `crates/droplet-platform/`)
+- **Persistent Store (`crates/droplet-storage/src/lib.rs`):** compact flat-file persistence (`Store`) bounded to `MAX_HISTORY_ENTRIES = 1000`, `MAX_BOOKMARK_ENTRIES = 256`, and `MAX_FILE_BYTES = 512 KiB`, powering history (`about:history`), bookmarks (`about:bookmarks`, `Ctrl+D`), and prefix address-bar autocomplete (`Store::suggest`).
+- **Browser Session (`crates/droplet-shell/src/`):** `Browser` orchestrates multi-tab `TabState` slots, **Tab Hibernation** (`MAX_WARM_TABS = 3`), concurrent `<link rel="stylesheet">` / `<img>` loading (`loader.rs`), Find-in-Page (`find.rs`), form input/caret/selection/submission (`forms.rs`), `TabJsState` + `ShellDomHost` (`js.rs`), Box Model Inspector toggle, and `take_damage()` / `set_present_backend()`.
+- **Cross-Platform Windowing & Zero-Copy Blit (`crates/droplet-platform/src/`):**
+  - `lib.rs` defines `PlatformApp` (including `take_damage` and `set_present_backend`), `NavKey`, and `CaretMove`, dispatching `run(app)` by `#[cfg(target_os = ...)]`.
+  - **Linux Wayland (`linux_wayland.rs`):** runtime `dlopen("libwayland-client.so.0")` client implementing `xdg-shell` and `wl_shm` (`memfd_create`), rendering directly into shared memory buffers via `Canvas::with_external_slice` and issuing `wl_surface.damage_buffer` (`v4`) / `damage` (`v1-3`), reporting `"wayland-shm"` and falling back automatically to X11 if Wayland is unavailable.
+  - **Linux X11 (`linux_x11.rs`):** runtime `dlopen("libX11.so.6")` + `dlopen("libXext.so.6")` with SysV `MIT-SHM` (`XShmCreateImage` / `XShmAttach` / `XShmPutImage`), rendering directly into SHM memory and blitting clamped `DamageRect` sub-rects (`"x11-shm"`), falling back cleanly to `XCreateImage` / `XPutImage` (`"x11-putimage"`).
+  - **Windows (`windows.rs`):** Win32 `CreateWindowExW` / `GetMessageW` event loop with persistent `DibSurface` (`CreateCompatibleDC` + top-down 32bpp `CreateDIBSection`), rendering directly into GDI DIB bits via `Canvas::with_external_slice` / `with_external_slice_unfilled` and `BitBlt`ing only the unioned `DamageRect` / `PAINTSTRUCT.rc_paint` (`"win32-dibsection"` with `"win32-stretchdibits"` fallback).
+  - **macOS (`macos.rs`):** Cocoa/AppKit + CoreGraphics runtime FFI (`NSApplication`, `NSWindow`, flipped `NSView`, `CGContextClipToRect` dirty-rect clipping, `setNeedsDisplayInRect:`, `"cocoa"` backend reporting), verified via cross-compilation targeting `aarch64-apple-darwin`.
+  - **Clipboard (`clipboard.rs`):** X11 (`xclip`/`xsel`/protocol helpers) and Win32 Unicode clipboard integration with headless-safe fallback.
+
+### 11. Multi-Process Renderer Isolation (`crates/droplet-sandbox/`, `crates/droplet-ipc/`, `crates/droplet-shell/src/renderer.rs`, `apps/droplet-desktop/`)
+- **Privilege Separation (`RendererHost` <-> `--renderer`):**
+  - **Privileged Browser Process (`apps/droplet-desktop/src/renderer_host.rs`):** `RendererHost` allocates a shared pixel buffer (`ShmFrameBuffer`), spawns the `--renderer` child (`--renderer-w <W> --renderer-h <H>`) with `DROPLET_IPC_SHM_FD`, pre-fetches HTML and referenced CSS/image/script assets via `droplet-net` (`prefetch_page_payload`), sends `RenderPage`/`Scroll`/`Resize`/`Mouse*`/`JsEval`/`Shutdown` commands, reads rendered pixels straight out of shared memory, and handles child crash/EOF errors cleanly.
+  - **Zero-IO Renderer Worker (`crates/droplet-shell/src/renderer.rs`, `apps/droplet-desktop/src/renderer_child.rs`):** attaches `ShmFrameBuffer::from_env_token`, warms `HeadlessRenderer` (which performs zero `droplet_net` or `std::fs` calls and resolves assets strictly from `RenderPayload.assets`), locks down the process with `apply_renderer_sandbox(SandboxProfile::StrictRenderer)`, emits `RendererToBrowser::Ready`, and paints directly into shared memory (`Canvas::with_external_slice` / `with_external_slice_unfilled`).
+- **OS Sandboxing (`crates/droplet-sandbox/src/`):**
+  - `SandboxProfile::{StrictRenderer, PermissiveFallback}`, `SandboxReport`, `apply_renderer_sandbox`, `apply_process_rlimits`.
+  - **Linux (`linux.rs`):** `setrlimit` (`RLIMIT_CORE = 0`, `RLIMIT_NOFILE = 64`, `RLIMIT_AS = 1 GiB` clamped to hard limit), best-effort `unshare(CLONE_NEWUSER | CLONE_NEWNET)` + `/proc/self/{setgroups,uid_map,gid_map}`, `PR_SET_NO_NEW_PRIVS`, and pure-Rust `seccomp-bpf` (`AUDIT_ARCH_X86_64` / `AUDIT_ARCH_AARCH64`) blocking `socket`, `socketpair`, `connect`, `bind`, `listen`, `accept`/`accept4`, `execve`/`execveat`, `clone`/`clone3`/`fork`/`vfork`, `open`/`openat`/`openat2`, `ptrace`, `kill` (and unlisted syscalls) with `EPERM`.
+  - **Windows (`windows.rs`):** Job Objects (`JOBOBJECT_EXTENDED_LIMIT_INFORMATION` + `JOBOBJECT_BASIC_UI_RESTRICTIONS`) and Restricted Tokens (`CreateRestrictedToken` with `DISABLE_MAX_PRIVILEGE`).
+  - **macOS (`macos.rs`):** `setrlimit` + `sandbox_init(kSBXProfileNoNetwork)`.
+- **Framed IPC & Shared Framebuffer (`crates/droplet-ipc/src/`):**
+  - `ShmFrameBuffer` (`MAX_SHM_PIXELS = 64_000_000`) backed by `memfd_create` + `mmap` on Linux and `CreateFileMappingW` + `MapViewOfFile` on Windows.
+  - Framed binary IPC (`IPC_MAGIC = *b"DRIP"`, `IPC_VERSION = 1`, `MAX_IPC_MESSAGE_BYTES = 32 MiB`) carrying `BrowserToRenderer` and `RendererToBrowser` messages over stdin/stdout pipes.
 
 ---
 
 ## Low-RAM Architecture (Why Droplet Stays Under Tens of MB)
 
-Droplet is engineered so a running session with multiple tabs stays in the **low tens of megabytes** rather than hundreds of megabytes per tab.
-
-### Implemented Invariants (Live Today)
-1. **Zero-`HashMap` `Copy` `ComputedStyle` & Flat `Vec` DOM Attributes:**
-   - `ElementData.attributes` is `Vec<(String, String)>` instead of `HashMap<String, String>`. Elements without attributes (`<p>`, `<span>`, `<div>`, `<li>`, `<td>`) allocate **0 bytes** on the heap for attributes, saving ~48–96 bytes + bucket overhead per element.
-   - `ComputedStyle` derives `Copy` and stores typed fields directly—zero per-node `HashMap<String, Value>` allocations across the entire `StyledNode` and `LayoutBox` trees.
-2. **Contiguous Arena DOM (`Vec<Node>`) + Iterative Traversals:**
-   - Every HTML node sits sequentially in `Document.nodes: Vec<Node>` indexed by `NodeId = usize`, eliminating thousands of individual `Rc<RefCell<...>>` heap allocations and pointer-chasing cache misses.
-3. **Automatic Tab Hibernation (`MAX_WARM_TABS = 3`):**
-   - Opening 10+ tabs does **not** keep 10+ full DOM, Layout, DisplayList, and decoded RGBA image trees resident in RAM. Once warm tabs exceed `MAX_WARM_TABS = 3`, the least-recently-used background tabs shed their heavy rendering state and keep only URL, title, and navigation history until selected again.
-4. **Bounded `GlyphAtlas` (`MAX_ATLAS_ENTRIES = 4096`) & Shared `SYSTEM_FONTS`:**
-   - Font bytes (`TrueTypeFont`) are parsed once into `OnceLock<Arc<FontSet>>` and shared across tabs. The rasterized alpha glyph cache is hard-capped at `4096` entries so long browsing sessions cannot leak unbounded bitmap memory.
-5. **Memory Guards on Network & Media:**
-   - `image::decode` enforces `MAX_IMAGE_PIXELS = 64_000_000` **before** allocating RGBA pixel buffers, neutralizing decompression/dimension bombs.
-   - `net.rs` caps response bodies (`MAX_RESPONSE_BYTES = 16 MiB`), headers (`64 KiB`), DNS entries (`256`), and pooled sockets (`32`), while `TrackerFilter` blocks ad/telemetry requests before DNS/TCP or body allocation even happens.
-6. **Single Reused Framebuffer + O(1) DisplayList Culling + Event-Driven Sleep:**
-   - `Canvas.pixels` (`Vec<u32>`) is resized in place on window configure events; scrolling walks the cached flat `DisplayList` with O(1) Y-bounds culling; `stylesheet_uses_interaction` avoids restyle/relayout on mouse moves over static pages; blocking `XNextEvent` / `GetMessageW` keeps idle CPU at `~0%`.
-
-### Planned Low-RAM Optimizations (Next Phases)
-1. **String Interning / Arena Text Slice Pool:** Intern repeated HTML tag names, attribute keys, class tokens, and short text nodes into a per-document arena buffer instead of individual `String` heap allocations.
-2. **LRU Decoded Image Byte Budget & Downscaling:** Keep decoded RGBA images bounded by a strict megabyte budget across active tabs, evicting off-screen images or storing display-resolution mipmaps rather than keeping oversized source bitmaps resident.
-3. **Linear Arena `LayoutBox` Tree:** Flatten `LayoutBox.children: Vec<LayoutBox>` into an indexed `Vec<LayoutBox>` arena (`LayoutId(usize)`) to eliminate per-box child `Vec` heap allocations.
-4. **Zero-Copy Surface Blitting (`DROP-009`):** Present directly via X11 `MIT-SHM` / Win32 `DIBSection` / GPU texture upload so the compositor avoids duplicate pixel-buffer copies.
+1. **Zero-`HashMap` `Copy` `ComputedStyle` & Flat `Vec` DOM Attributes:** `ElementData.attributes` is `Vec<(String, String)>` (0 bytes heap allocation on attribute-less elements) and `ComputedStyle` derives `Copy` with no per-node `HashMap`.
+2. **Contiguous Arena DOM (`Vec<Node>`) + Iterative Traversals:** Eliminates thousands of individual `Rc<RefCell<...>>` node allocations on DOM layout/style trees and avoids stack overflows on deeply nested HTML.
+3. **Automatic Tab Hibernation (`MAX_WARM_TABS = 3`):** Background tabs past the warm LRU limit shed DOM, layout, display list, and decoded image trees while retaining URL, title, and navigation history.
+4. **Bounded Caches & Media Guards:** `MAX_ATLAS_ENTRIES = 4096` glyphs, `SYSTEM_FONTS` shared via `OnceLock<Arc<FontSet>>`, `MAX_IMAGE_PIXELS = 64_000_000`, `MAX_RESPONSE_BYTES = 16 MiB`, `DNS_CACHE_MAX_ENTRIES = 256`, `POOL_MAX_TOTAL = 32`, `MAX_HISTORY_ENTRIES = 1000`, `MAX_BOOKMARK_ENTRIES = 256`, `MAX_DOM_LISTENERS = 1024`, and `TrackerFilter` blocking before DNS/TCP.
+5. **Direct External-Slice Rendering & Partial Damage (`DamageRect`):** Wayland `wl_shm`, X11 `MIT-SHM`, and Win32 `DIBSection` render directly into OS/shared pixel memory and present only damaged sub-rectangles, while `DirtyFlags` avoids full relayout on paint-only JS/DOM changes and blocking event loops keep idle CPU near `~0%`.

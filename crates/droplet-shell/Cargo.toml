@@ -11,6 +11,8 @@ droplet-style = { path = "../droplet-style" }
 droplet-gfx = { path = "../droplet-gfx" }
 droplet-image = { path = "../droplet-image" }
 droplet-font = { path = "../droplet-font" }
+droplet-js = { path = "../droplet-js" }
 droplet-layout = { path = "../droplet-layout" }
 droplet-paint = { path = "../droplet-paint" }
 droplet-platform = { path = "../droplet-platform" }
+droplet-storage = { path = "../droplet-storage" }
