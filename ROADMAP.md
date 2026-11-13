@@ -54,7 +54,7 @@
 | Метрика | Цель | Сейчас |
 | --- | --- | --- |
 | CPU конвейер, `about:droplet` | `< 2 ms` | ~1.5 ms ✅ |
-| CPU конвейер, Wikipedia-статья | `< 40 ms` | ~42 ms ⚠️ (layout 22 ms; было 295 ms до `DROP-120`) |
+| CPU конвейер, Wikipedia-статья | `< 40 ms` | ~44 ms ⚠️ (style 10 ms, layout 22 ms; было 295 ms до `DROP-120`) |
 | Style, Wikipedia-статья | `< 20 ms` | ~10.3 ms ✅ (`DROP-120`: 261 → 8.5; `DROP-123` +1.7 мс — ~48 правил с `[attr]`/`:not`/`+`, которые раньше молча выбрасывались) |
 | Peak RSS, одна простая вкладка | `< 15 MB` | ~14 MB ✅ |
 | Peak RSS, Wikipedia-статья | `< 40 MB` | ~60 MB ❌ (`ComputedStyle` 148 → 184 байт в `DROP-124`) |
