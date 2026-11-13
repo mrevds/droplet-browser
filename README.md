@@ -154,3 +154,4 @@ corpus layout goldens in [tests/corpus](tests/corpus/README.md)).
 - [ROADMAP.md](ROADMAP.md) — Phased development roadmap & Cross-Platform Windowing Strategy (in Russian with standard technical terms in English).
 - [CLAUDE.md](CLAUDE.md) — Engineering standards, Linux + Windows rules, and autonomous workflow instructions for AI agents.
 - [.scratch/SPEC.md](.scratch/SPEC.md) — Frontier issue tracker (`DROP-001` .. `DROP-011`).
+# droplet-browser
