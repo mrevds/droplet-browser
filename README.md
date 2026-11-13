@@ -40,7 +40,7 @@ It is a Cargo workspace of focused engine crates with **zero external crate depe
 ```text
 apps/droplet-desktop/     CLI entry point, headless modes & multi-process RendererHost / --renderer
 crates/droplet-url/       URL parser and resolver
-crates/droplet-net/       HTTP/HTTPS (OpenSSL/Schannel), DNS cache, keep-alive pool, tracker filter, about:* pages
+crates/droplet-net/       HTTP/HTTPS (OpenSSL/Schannel), DNS cache, keep-alive pool, cookie jar, tracker filter, about:* pages
 crates/droplet-dom/       Arena DOM, iterative HTML parser, mutation & CSS selector queries
 crates/droplet-js/        Pure-Rust ES-subset lexer, compiler, stack bytecode VM & DomHost bridge
 crates/droplet-ipc/       Shared-memory framebuffer (memfd/Win32) and framed DRIP IPC protocol
@@ -53,7 +53,7 @@ crates/droplet-inflate/   DEFLATE / zlib / gzip decompression (PNG IDAT, HTTP Co
 crates/droplet-image/     PNG, baseline JPEG, BMP, PPM, and static SVG decoders
 crates/droplet-paint/     Flat display list, chrome, find/inspector/form overlays
 crates/droplet-platform/  Wayland, X11, Win32, macOS windowing & clipboard backends
-crates/droplet-storage/   Persistent binary/flat-file history, bookmarks & URL autocomplete store
+crates/droplet-storage/   Persistent binary/flat-file history, bookmarks, cookie file & URL autocomplete store
 crates/droplet-shell/     Multi-tab browser session, loader, forms, find, JS DOM host & zero-IO HeadlessRenderer
 apps/droplet-desktop/src/bin/droplet-webview/  WebKitGTK host process (dlopen, XEmbed)
 ```

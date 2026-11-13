@@ -380,6 +380,46 @@ pub fn now_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// File name of the persistent cookie jar inside the data directory (format owned by
+/// `droplet-net::cookies`).
+pub const COOKIE_FILE_NAME: &str = "cookies.txt";
+/// Cookie files larger than this are ignored on load (3000 cookies × 4 KiB fit well below it).
+pub const MAX_COOKIE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Reads the persistent cookie file from `dir`; `None` if missing, too large or not UTF-8.
+pub fn load_cookie_file(dir: &Path) -> Option<String> {
+    let path = dir.join(COOKIE_FILE_NAME);
+    if fs::metadata(&path).ok()?.len() > MAX_COOKIE_FILE_BYTES {
+        return None;
+    }
+    String::from_utf8(fs::read(path).ok()?).ok()
+}
+
+/// Atomically replaces the persistent cookie file in `dir` (temp file + rename). On Unix the
+/// file is created owner-only (`0600`) since it holds session credentials.
+pub fn save_cookie_file(dir: &Path, text: &str) -> Result<(), StorageError> {
+    fs::create_dir_all(dir).map_err(|err| StorageError::io("create data directory", err))?;
+    let path = dir.join(COOKIE_FILE_NAME);
+    let tmp = path.with_extension("tmp");
+    {
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
+            .map_err(|err| StorageError::io("create temporary cookie file", err))?;
+        file.write_all(text.as_bytes())
+            .map_err(|err| StorageError::io("write temporary cookie file", err))?;
+        file.flush()
+            .map_err(|err| StorageError::io("flush temporary cookie file", err))?;
+    }
+    fs::rename(&tmp, &path).map_err(|err| StorageError::io("replace cookie file", err))
+}
+
 /// Platform-neutral default data directory. `DROPLET_DATA_DIR` wins.
 pub fn default_data_dir() -> PathBuf {
     if let Some(path) = nonempty_env("DROPLET_DATA_DIR") {
@@ -779,6 +819,28 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn cookie_file_round_trip_and_size_cap() {
+        let dir = TempDir::new("cookies");
+        assert_eq!(load_cookie_file(&dir.0), None);
+        save_cookie_file(&dir.0, "DRPLCOOKIE1\nпример.рф\tданные\n").unwrap();
+        assert_eq!(
+            load_cookie_file(&dir.0).as_deref(),
+            Some("DRPLCOOKIE1\nпример.рф\tданные\n")
+        );
+        save_cookie_file(&dir.0, "DRPLCOOKIE1\n").unwrap();
+        assert_eq!(load_cookie_file(&dir.0).as_deref(), Some("DRPLCOOKIE1\n"));
+        assert!(!dir.0.join("cookies.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.0.join(COOKIE_FILE_NAME)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "cookie file must be owner-only");
+        }
+        fs::write(dir.0.join(COOKIE_FILE_NAME), [0xff, 0xfe]).unwrap();
+        assert_eq!(load_cookie_file(&dir.0), None, "non-UTF-8 file is ignored");
     }
 
     #[test]

@@ -179,6 +179,9 @@ impl Browser {
         store: HistoryStore,
         options: BrowserOptions,
     ) -> Self {
+        // Persistent cookies live next to history (DROP-113); loads them into the
+        // process-wide jar and makes later `cookies::flush` calls save there.
+        droplet_net::cookies::attach_store(store.data_dir());
         let initial_tab = TabState::create_tab("Droplet", 1);
 
         let mut browser = Self {

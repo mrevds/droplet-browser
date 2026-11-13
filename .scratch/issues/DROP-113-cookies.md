@@ -1,6 +1,6 @@
 # DROP-113 — Cookies
 
-Phase 1 · Status: ready · Blocked by: — · Owner: _(fill in)_
+Phase 1 · Status: done · Blocked by: — · Owner: Claude Opus 5.5 (claude-opus-5-5)
 
 ## Problem
 No `Cookie` / `Set-Cookie` support: no site login, no consent memory, some sites redirect-loop.

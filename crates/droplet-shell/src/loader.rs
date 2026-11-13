@@ -31,18 +31,24 @@ pub struct LoadedPage {
 /// and concurrently loads bounded subresource stylesheets and images.
 /// `<script>` elements are collected (and external ones fetched) only when `js` is true.
 pub fn load_url_document(url: &Url, js: bool) -> LoadedPage {
-    match droplet_net::fetch(url) {
+    let page = match droplet_net::fetch(url) {
         Ok(resp) => loaded_page_from_response(resp, js),
         Err(err) => load_error_page(url, &err),
-    }
+    };
+    // Save persistent cookies set by the page and its subresources once per navigation,
+    // off the UI thread when navigation runs in the background.
+    droplet_net::cookies::flush();
+    page
 }
 
 /// Fetches `url` with a form-encoded POST body and parses the response page.
 pub fn load_url_document_post(url: &Url, body: &str, js: bool) -> LoadedPage {
-    match droplet_net::fetch_post(url, body, "application/x-www-form-urlencoded") {
+    let page = match droplet_net::fetch_post(url, body, "application/x-www-form-urlencoded") {
         Ok(resp) => loaded_page_from_response(resp, js),
         Err(err) => load_error_page(url, &err),
-    }
+    };
+    droplet_net::cookies::flush();
+    page
 }
 
 fn loaded_page_from_response(resp: droplet_net::Response, js: bool) -> LoadedPage {

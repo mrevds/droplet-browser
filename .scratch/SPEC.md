@@ -30,7 +30,7 @@ Status values: `done`, `ready`, `blocked`, `frozen` (do not touch until its phas
 | `DROP-110` | P1 | Navigation off the UI thread: worker + channel, cancel, progressive status | `done` | — | HN, Wikipedia (GUI responsiveness) | [spec](issues/DROP-110-async-navigation.md) |
 | `DROP-111` | P1 | Reliable TLS handshake & timeouts (poll-based, separate connect/handshake/read deadlines) | `done` | — | HN | [spec](issues/DROP-111-tls-timeouts.md) |
 | `DROP-112` | P1 | `Content-Encoding: gzip/deflate` (reuse PNG inflate) | `done` | — | Wikipedia | [spec](issues/DROP-112-gzip.md) |
-| `DROP-113` | P1 | Cookies (RFC 6265 subset, bounded jar, `Secure`/`HttpOnly`/`Path`/`Expires`) | `ready` | — | login flows | [spec](issues/DROP-113-cookies.md) |
+| `DROP-113` | P1 | Cookies (RFC 6265 subset, bounded jar, `Secure`/`HttpOnly`/`Path`/`Expires`) | `done` | — | login flows | [spec](issues/DROP-113-cookies.md) |
 | `DROP-120` | P2 | Selector rule index (buckets by id/class/tag, right-to-left match) | `done` | — | Wikipedia style `261 ms → < 20 ms` | [spec](issues/DROP-120-rule-index.md) |
 | `DROP-121` | P2 | Cascade: `!important`, `inherit`/`initial`/`unset`, custom properties + `var()` | `ready` | — | `08-cascade` | [spec](issues/DROP-121-cascade.md) |
 | `DROP-122` | P2 | `@media` (width/height/orientation/`prefers-color-scheme`/print), `@import`, `@supports` basic | `ready` | — | `07-media`, Wikipedia | [spec](issues/DROP-122-at-rules.md) |

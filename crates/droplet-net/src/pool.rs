@@ -193,6 +193,8 @@ pub(crate) struct RawHttpResponse {
     pub status: u16,
     pub content_type: String,
     pub location: Option<String>,
+    /// Raw `Set-Cookie` header values, in order.
+    pub set_cookies: Vec<String>,
     pub body: Vec<u8>,
 }
 
@@ -204,24 +206,44 @@ enum ExchangeOutcome {
     Stale,
 }
 
-pub(crate) fn send_http_get(url: &Url) -> Result<RawHttpResponse, NetError> {
-    send_http_request(url, "GET", None, None)
+/// One HTTP request: method, optional form body and optional `Cookie` header value.
+pub(crate) struct HttpRequest<'a> {
+    pub method: &'a str,
+    pub body: Option<&'a str>,
+    pub content_type: Option<&'a str>,
+    pub cookie: Option<&'a str>,
+}
+
+pub(crate) fn send_http_get(url: &Url, cookie: Option<&str>) -> Result<RawHttpResponse, NetError> {
+    send_http_request(
+        url,
+        &HttpRequest {
+            method: "GET",
+            body: None,
+            content_type: None,
+            cookie,
+        },
+    )
 }
 
 pub(crate) fn send_http_post(
     url: &Url,
     body: &str,
     content_type: &str,
+    cookie: Option<&str>,
 ) -> Result<RawHttpResponse, NetError> {
-    send_http_request(url, "POST", Some(body), Some(content_type))
+    send_http_request(
+        url,
+        &HttpRequest {
+            method: "POST",
+            body: Some(body),
+            content_type: Some(content_type),
+            cookie,
+        },
+    )
 }
 
-fn send_http_request(
-    url: &Url,
-    method: &str,
-    body: Option<&str>,
-    content_type: Option<&str>,
-) -> Result<RawHttpResponse, NetError> {
+fn send_http_request(url: &Url, req: &HttpRequest<'_>) -> Result<RawHttpResponse, NetError> {
     let Some(skey) = scheme_key(&url.scheme) else {
         return Err(NetError {
             message: format!("Unsupported network scheme for {}", url.as_str()),
@@ -230,7 +252,7 @@ fn send_http_request(
     let pool_key = (skey, url.host.clone(), url.port);
 
     if let Some(mut pooled) = take_pooled_conn(&pool_key) {
-        match execute_http_exchange(&mut pooled, url, true, method, body, content_type)? {
+        match execute_http_exchange(&mut pooled, url, true, req)? {
             ExchangeOutcome::Complete { parsed, can_reuse } => {
                 if can_reuse {
                     return_pooled_conn(pool_key, pooled);
@@ -244,7 +266,7 @@ fn send_http_request(
     }
 
     let mut fresh = connect_stream(url)?;
-    match execute_http_exchange(&mut fresh, url, false, method, body, content_type)? {
+    match execute_http_exchange(&mut fresh, url, false, req)? {
         ExchangeOutcome::Complete { parsed, can_reuse } => {
             if can_reuse {
                 return_pooled_conn(pool_key, fresh);
@@ -261,10 +283,14 @@ fn execute_http_exchange(
     stream: &mut TransportStream,
     url: &Url,
     is_reused: bool,
-    method: &str,
-    body: Option<&str>,
-    content_type: Option<&str>,
+    req: &HttpRequest<'_>,
 ) -> Result<ExchangeOutcome, NetError> {
+    let HttpRequest {
+        method,
+        body,
+        content_type,
+        cookie,
+    } = *req;
     let target = url.request_target();
     let host_header = url.host_header();
 
@@ -276,6 +302,14 @@ fn execute_http_exchange(
          Accept-Encoding: gzip, deflate\r\n\
          Connection: keep-alive\r\n"
     );
+    if let Some(cookie) = cookie {
+        // The jar never stores CR/LF, but never let a header be injected either way.
+        if !cookie.contains(['\r', '\n']) {
+            request.push_str("Cookie: ");
+            request.push_str(cookie);
+            request.push_str("\r\n");
+        }
+    }
     if let Some(body) = body {
         let content_type = content_type.unwrap_or("application/x-www-form-urlencoded");
         if content_type.contains('\r') || content_type.contains('\n') {
@@ -326,6 +360,7 @@ struct ParsedHeaders {
     status: u16,
     content_type: String,
     location: Option<String>,
+    set_cookies: Vec<String>,
     is_chunked: bool,
     content_length: Option<usize>,
     server_close: bool,
@@ -344,6 +379,7 @@ fn parse_headers_block(header_bytes: &[u8], url: &Url) -> Result<ParsedHeaders, 
 
     let mut content_type = "text/html; charset=utf-8".to_string();
     let mut location = None;
+    let mut set_cookies = Vec::new();
     let mut is_chunked = false;
     let mut content_length: Option<usize> = None;
     let mut has_close = false;
@@ -363,6 +399,7 @@ fn parse_headers_block(header_bytes: &[u8], url: &Url) -> Result<ParsedHeaders, 
         match key.as_str() {
             "content-type" if !value.is_empty() => content_type = value.to_string(),
             "location" if !value.is_empty() => location = Some(value.to_string()),
+            "set-cookie" if !value.is_empty() => set_cookies.push(value.to_string()),
             "content-encoding" => content_encoding.extend(
                 value
                     .split(',')
@@ -407,6 +444,7 @@ fn parse_headers_block(header_bytes: &[u8], url: &Url) -> Result<ParsedHeaders, 
         status,
         content_type,
         location,
+        set_cookies,
         is_chunked,
         content_length,
         server_close,
@@ -508,6 +546,7 @@ fn read_http_response(
             status: headers.status,
             content_type: headers.content_type,
             location: headers.location,
+            set_cookies: headers.set_cookies,
             body,
         },
         can_reuse,

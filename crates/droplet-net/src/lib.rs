@@ -1,5 +1,6 @@
 mod about;
 pub mod adblock;
+pub mod cookies;
 mod dns;
 mod pool;
 mod tls;
@@ -193,15 +194,19 @@ fn fetch_post_raw_with_filter(
             });
         }
 
+        let cookie = cookies::header_for(&current_url);
         let resp = if method == "POST" {
             pool::send_http_post(
                 &current_url,
                 body.as_deref().unwrap_or(""),
                 &content_type,
+                cookie.as_deref(),
             )?
         } else {
-            pool::send_http_get(&current_url)?
+            pool::send_http_get(&current_url, cookie.as_deref())?
         };
+        // Redirect hops set cookies too (login flows: POST → 302 + Set-Cookie → GET).
+        cookies::store_response_cookies(&current_url, &resp.set_cookies);
 
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
             if let Some(loc) = resp.location {
@@ -307,7 +312,9 @@ fn fetch_network_with_redirects(
             });
         }
 
-        let resp = pool::send_http_get(&current_url)?;
+        let cookie = cookies::header_for(&current_url);
+        let resp = pool::send_http_get(&current_url, cookie.as_deref())?;
+        cookies::store_response_cookies(&current_url, &resp.set_cookies);
 
         if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
             if let Some(loc) = resp.location {
@@ -996,5 +1003,56 @@ mod tests {
         assert_eq!(status, 304);
         assert!(body.is_empty());
     }
-}
 
+    // ---- DROP-113: cookies ------------------------------------------------------------
+
+    #[test]
+    fn set_cookie_on_302_is_sent_on_the_follow_up_request() {
+        // The jar is process-wide and ignores ports, so scope these cookies to a path no
+        // other test requests.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/drop113/login")).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let req1 = read_http_request_head(&mut sock);
+            assert!(req1.starts_with("GET /drop113/login HTTP/1.1\r\n"));
+            assert!(!req1.contains("Cookie:"), "no cookies before login: {req1}");
+            sock.write_all(
+                "HTTP/1.1 302 Found\r\nLocation: /drop113/home\r\n\
+                 Set-Cookie: sid=сессия; Path=/drop113; HttpOnly\r\n\
+                 set-cookie: theme=dark; Max-Age=60; Path=/drop113\r\n\
+                 Set-Cookie: bad\r\n\
+                 Set-Cookie: tls=1; Secure; Path=/drop113\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    .as_bytes(),
+            )
+            .unwrap();
+
+            let (mut sock2, _) = listener.accept().unwrap();
+            let req2 = read_http_request_head(&mut sock2);
+            let body = "<p>welcome</p>";
+            sock2
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            req2
+        });
+
+        let resp = fetch(&url).unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(resp.url.as_str().ends_with("/drop113/home"));
+        let req2 = server.join().unwrap();
+        assert!(req2.starts_with("GET /drop113/home HTTP/1.1\r\n"), "{req2}");
+        // `tls` is Secure and was set over plain http, so it was rejected.
+        assert!(
+            req2.contains("\r\nCookie: sid=сессия; theme=dark\r\n"),
+            "follow-up request lacks cookies: {req2}"
+        );
+    }
+}
