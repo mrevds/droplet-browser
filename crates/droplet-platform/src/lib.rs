@@ -3,7 +3,15 @@
 pub mod clipboard;
 
 pub use droplet_gfx::{Canvas, Color, DamageRect};
+
+/// Thread-safe "wake the event loop" callback handed to the app by a backend that can be
+/// woken from other threads. After it fires, the backend calls [`PlatformApp::poll_background`]
+/// on the UI thread.
+pub type Waker = std::sync::Arc<dyn Fn() + Send + Sync>;
 pub use clipboard::{get_text as clipboard_get_text, set_text as clipboard_set_text};
+
+#[cfg(target_os = "linux")]
+mod linux_wake;
 
 #[cfg(target_os = "linux")]
 mod linux_wayland;
@@ -104,6 +112,16 @@ pub trait PlatformApp {
     }
     /// Informs the app which presentation backend (`"shm"`, `"dmabuf"`, `"jpeg"`, etc.) is active.
     fn set_present_backend(&mut self, _backend: &'static str) {}
+
+    /// Called once by backends that can be woken from other threads (X11, Wayland, Win32).
+    /// Apps that never receive a waker must do all work synchronously.
+    fn set_waker(&mut self, _waker: Waker) {}
+
+    /// Called on the UI thread after the waker fired: apply finished background work.
+    /// Returns `true` if anything changed (the backend then repaints if `needs_repaint`).
+    fn poll_background(&mut self) -> bool {
+        false
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]

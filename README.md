@@ -133,7 +133,7 @@ corpus layout goldens in [tests/corpus](tests/corpus/README.md)).
 | **Mouse Buttons 8 / 9** | History Back / Forward |
 | `Ctrl+T` / `Ctrl+W` | Open a new tab / Close active tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+1..9` | Cycle next/prev tab or jump directly to tab 1–9 |
-| `Ctrl+L` / `Enter` / `Esc` | Focus address bar / Navigate (or accept autocomplete) / Unfocus or dismiss bar |
+| `Ctrl+L` / `Enter` / `Esc` | Focus address bar / Navigate (or accept autocomplete) / Stop a loading page, else unfocus or dismiss bar |
 | `Ctrl+D` | Bookmark / unbookmark current page |
 | `Ctrl+F` (`Enter` / `Shift+Enter`) | Open Find-in-Page (`Next` / `Previous` match) |
 | `Ctrl+Shift+I` | Toggle Box Model Inspector overlay |

@@ -23,6 +23,7 @@ use std::sync::OnceLock;
 
 use droplet_gfx::{Canvas, Color, DamageRect};
 
+use crate::linux_wake::{wait_readable, WakePipe};
 use crate::{format_window_title, NavKey, PlatformApp};
 
 const RTLD_LAZY: c_int = 1;
@@ -771,6 +772,11 @@ struct WaylandApi {
     wl_display_dispatch: unsafe extern "C" fn(*mut WlDisplay) -> c_int,
     wl_display_roundtrip: unsafe extern "C" fn(*mut WlDisplay) -> c_int,
     wl_display_flush: unsafe extern "C" fn(*mut WlDisplay) -> c_int,
+    wl_display_get_fd: unsafe extern "C" fn(*mut WlDisplay) -> c_int,
+    wl_display_prepare_read: unsafe extern "C" fn(*mut WlDisplay) -> c_int,
+    wl_display_read_events: unsafe extern "C" fn(*mut WlDisplay) -> c_int,
+    wl_display_cancel_read: unsafe extern "C" fn(*mut WlDisplay),
+    wl_display_dispatch_pending: unsafe extern "C" fn(*mut WlDisplay) -> c_int,
     wl_proxy_marshal_flags: MarshalFlagsFn,
     wl_proxy_add_listener:
         unsafe extern "C" fn(*mut WlProxy, *const *const c_void, *mut c_void) -> c_int,
@@ -821,6 +827,11 @@ impl WaylandApi {
                 wl_display_dispatch: load_sym(handle, c"wl_display_dispatch")?,
                 wl_display_roundtrip: load_sym(handle, c"wl_display_roundtrip")?,
                 wl_display_flush: load_sym(handle, c"wl_display_flush")?,
+                wl_display_get_fd: load_sym(handle, c"wl_display_get_fd")?,
+                wl_display_prepare_read: load_sym(handle, c"wl_display_prepare_read")?,
+                wl_display_read_events: load_sym(handle, c"wl_display_read_events")?,
+                wl_display_cancel_read: load_sym(handle, c"wl_display_cancel_read")?,
+                wl_display_dispatch_pending: load_sym(handle, c"wl_display_dispatch_pending")?,
                 wl_proxy_marshal_flags: load_sym(handle, c"wl_proxy_marshal_flags")?,
                 wl_proxy_add_listener: load_sym(handle, c"wl_proxy_add_listener")?,
                 wl_proxy_destroy: load_sym(handle, c"wl_proxy_destroy")?,
@@ -2155,6 +2166,12 @@ impl<A: PlatformApp> WaylandState<A> {
 
     fn run_loop(&mut self) -> Result<(), String> {
         let mut first_frame = true;
+        // Background work (page loads) wakes the loop through this self-pipe (DROP-110).
+        let wake = WakePipe::new().ok();
+        if let Some(ref pipe) = wake {
+            let waker = pipe.waker();
+            self.app().set_waker(waker);
+        }
 
         while self.running {
             self.retiring_pools.retain(|pool| !pool.is_idle());
@@ -2169,10 +2186,13 @@ impl<A: PlatformApp> WaylandState<A> {
                 break;
             }
 
-            unsafe {
-                (self.api.wl_display_flush)(self.display);
-            }
-            let rc = unsafe { (self.api.wl_display_dispatch)(self.display) };
+            let rc = match wake {
+                Some(ref pipe) => self.dispatch_or_wake(pipe),
+                None => unsafe {
+                    (self.api.wl_display_flush)(self.display);
+                    (self.api.wl_display_dispatch)(self.display)
+                },
+            };
             if rc < 0 {
                 return Err(format!(
                     "wl_display_dispatch failed: {}",
@@ -2184,6 +2204,36 @@ impl<A: PlatformApp> WaylandState<A> {
             }
         }
         Ok(())
+    }
+}
+
+impl<A: PlatformApp> WaylandState<A> {
+    /// One blocking wait on the display fd *and* the wake pipe, using the thread-safe
+    /// `prepare_read` / `read_events` protocol, then dispatches what arrived.
+    /// Returns the `wl_display_*` status (negative on a fatal display error).
+    fn dispatch_or_wake(&mut self, pipe: &WakePipe) -> c_int {
+        unsafe {
+            while (self.api.wl_display_prepare_read)(self.display) != 0 {
+                if (self.api.wl_display_dispatch_pending)(self.display) < 0 {
+                    return -1;
+                }
+            }
+            (self.api.wl_display_flush)(self.display);
+            let display_fd = (self.api.wl_display_get_fd)(self.display);
+            let [display_ready, woke] = wait_readable([display_fd, pipe.read_fd()]);
+            if display_ready {
+                if (self.api.wl_display_read_events)(self.display) < 0 {
+                    return -1;
+                }
+            } else {
+                (self.api.wl_display_cancel_read)(self.display);
+            }
+            let rc = (self.api.wl_display_dispatch_pending)(self.display);
+            if woke && pipe.drain() {
+                self.app().poll_background();
+            }
+            rc
+        }
     }
 }
 

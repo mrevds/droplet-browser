@@ -244,7 +244,8 @@ fn run_sandbox_screenshot(
 }
 
 fn run_gui(url: &str) {
-    let browser = Browser::new(url, 1140, 780);
+    // The window opens at once; the page loads in the background (DROP-110).
+    let browser = Browser::new_deferred(url, 1140, 780);
     if let Err(err) = droplet_platform::run(browser) {
         eprintln!("Could not start graphical window: {err}");
         eprintln!("Tip: if no display server is attached, you can run Droplet headlessly using:");

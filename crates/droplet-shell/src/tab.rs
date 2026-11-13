@@ -10,6 +10,7 @@ use droplet_url::Url;
 
 use crate::forms::FormState;
 use crate::js::TabJsState;
+use crate::nav::PendingNav;
 
 /// Maximum number of non-hibernated tabs kept warm in memory simultaneously.
 pub const MAX_WARM_TABS: usize = 3;
@@ -83,6 +84,9 @@ pub struct TabState {
     pub layout_rebuilds: usize,
     /// Number of display-list rebuilds run for this tab since load/reset.
     pub display_list_rebuilds: usize,
+    /// Navigation started but not yet committed (DROP-110). The visible page stays the
+    /// previous one until the result arrives.
+    pub pending: Option<PendingNav>,
 }
 
 impl TabState {
@@ -110,6 +114,7 @@ impl TabState {
             dirty: DirtyFlags::clean(),
             layout_rebuilds: 0,
             display_list_rebuilds: 0,
+            pending: None,
         }
     }
 
@@ -131,6 +136,7 @@ impl TabState {
 
     /// Resets navigation history and scroll position when recycling the sole remaining tab.
     pub fn reset_for_reuse(&mut self, last_active_seq: u64) {
+        self.pending = None;
         self.back_stack.clear();
         self.forward_stack.clear();
         self.scroll_y = 0.0;

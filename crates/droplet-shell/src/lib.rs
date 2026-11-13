@@ -5,6 +5,7 @@ pub mod forms;
 pub mod history_store;
 pub mod js;
 pub mod loader;
+pub mod nav;
 pub mod renderer;
 pub mod tab;
 
@@ -110,11 +111,30 @@ pub struct Browser {
     pressed_target: Option<PressedTarget>,
     active_seq_counter: u64,
     js_enabled: bool,
+    nav: nav::Navigator,
+    /// Initial URL of a GUI browser, loaded once the event loop exists (see `new_deferred`).
+    deferred_start: Option<String>,
 }
 
 impl Browser {
     pub fn new(initial_url: &str, width: usize, height: usize) -> Self {
         Self::with_options(initial_url, width, height, BrowserOptions::from_defaults())
+    }
+
+    /// GUI constructor: the window opens immediately on a blank tab and `initial_url` starts
+    /// loading when the platform installs its waker (in the background). Backends without a
+    /// waker load it synchronously right before the first frame.
+    pub fn new_deferred(initial_url: &str, width: usize, height: usize) -> Self {
+        let mut browser = Self::new("about:blank", width, height);
+        browser.url_input = initial_url.to_string();
+        browser.deferred_start = Some(initial_url.to_string());
+        browser
+    }
+
+    fn start_deferred(&mut self) {
+        if let Some(url) = self.deferred_start.take() {
+            self.load_input_into_tab(0, &url, false);
+        }
     }
 
     /// Constructs a browser with explicit feature switches.
@@ -180,6 +200,8 @@ impl Browser {
             pressed_target: None,
             active_seq_counter: 1,
             js_enabled: options.js,
+            nav: nav::Navigator::new(),
+            deferred_start: None,
         };
 
         browser.load_input_into_tab(0, initial_url, false);
@@ -471,14 +493,16 @@ impl Browser {
 
         match resolved {
             Ok(target_url) => {
-                if push_history {
-                    let prev_url = self.tabs[tab_idx].current_url.clone();
-                    self.tabs[tab_idx].back_stack.push(prev_url);
-                    self.tabs[tab_idx].forward_stack.clear();
-                }
-                self.load_url_into_tab(tab_idx, target_url);
+                let history = if push_history {
+                    nav::HistoryOp::Push
+                } else {
+                    nav::HistoryOp::None
+                };
+                self.start_navigation(tab_idx, target_url, history, nav::NavRequest::Get, None);
             }
             Err(err) => {
+                // A newer navigation supersedes anything still in flight for this tab.
+                self.tabs[tab_idx].pending = None;
                 if tab_idx == self.active_tab {
                     self.url_input = trimmed.to_string();
                     self.url_focused = false;
@@ -495,24 +519,143 @@ impl Browser {
         }
     }
 
-    fn load_url_into_tab(&mut self, tab_idx: usize, url: Url) {
+    /// Starts loading `url` into `tab_idx`. The page currently shown stays interactive until
+    /// the result is committed; history changes only on commit (see [`nav::HistoryOp`]).
+    fn start_navigation(
+        &mut self,
+        tab_idx: usize,
+        url: Url,
+        history: nav::HistoryOp,
+        request: nav::NavRequest,
+        restore_scroll: Option<f32>,
+    ) {
         self.store.dismiss_autocomplete();
-        self.tabs[tab_idx].current_url = url.clone();
         if tab_idx == self.active_tab {
             self.url_input = url.as_str().to_string();
             self.url_focused = false;
         }
+        let pending = nav::PendingNav {
+            nav_id: self.nav.next_id(),
+            url: url.clone(),
+            history,
+            restore_scroll,
+            start: Instant::now(),
+        };
 
-        let load_start = Instant::now();
-        let page = self
-            .store
-            .user_page(&url)
-            .unwrap_or_else(|| loader::load_url_document(&url, self.js_enabled));
-        self.tabs[tab_idx].current_url = page.final_url.clone();
+        // Built-in history/bookmark pages need the store: always local and instant.
+        if request == nav::NavRequest::Get {
+            if let Some(page) = self.store.user_page(&url) {
+                self.tabs[tab_idx].pending = None;
+                self.commit_navigation(tab_idx, pending, page);
+                return;
+            }
+        }
+
+        let nav_id = pending.nav_id;
+        self.tabs[tab_idx].pending = Some(pending);
+        match self.nav.spawn(nav_id, url, request, self.js_enabled) {
+            Ok(()) => {
+                if tab_idx == self.active_tab {
+                    self.status_text = loading_status(&self.tabs[tab_idx]);
+                    self.mark_chrome_repaint();
+                }
+            }
+            Err(inline) => {
+                let (url, request) = *inline;
+                let page = nav::fetch_page(&url, &request, self.js_enabled);
+                if let Some(pending) = self.tabs[tab_idx].pending.take() {
+                    self.commit_navigation(tab_idx, pending, page);
+                }
+            }
+        }
+    }
+
+    /// Applies a finished navigation: history op, URL, page, scroll restore.
+    fn commit_navigation(
+        &mut self,
+        tab_idx: usize,
+        pending: nav::PendingNav,
+        page: loader::LoadedPage,
+    ) {
+        let tab = &mut self.tabs[tab_idx];
+        let previous = tab.current_url.clone();
+        match pending.history {
+            nav::HistoryOp::None => {}
+            nav::HistoryOp::Push => {
+                tab.back_stack.push(previous);
+                tab.forward_stack.clear();
+            }
+            nav::HistoryOp::Back => {
+                tab.back_stack.pop();
+                tab.forward_stack.push(previous);
+            }
+            nav::HistoryOp::Forward => {
+                tab.forward_stack.pop();
+                tab.back_stack.push(previous);
+            }
+        }
+        tab.current_url = page.final_url.clone();
         if tab_idx == self.active_tab {
             self.url_input = page.final_url.as_str().to_string();
         }
-        self.apply_loaded_page(tab_idx, page, load_start);
+        self.apply_loaded_page(tab_idx, page, pending.start);
+        if let Some(saved) = pending.restore_scroll {
+            if tab_idx == self.active_tab {
+                let max_s = self.max_scroll();
+                self.tabs[tab_idx].scroll_y = saved.clamp(0.0, max_s);
+            } else {
+                self.tabs[tab_idx].scroll_y = saved.max(0.0);
+            }
+        }
+        if tab_idx != self.active_tab {
+            self.mark_chrome_repaint();
+        }
+        self.enforce_warm_tab_limit();
+    }
+
+    /// Commits every finished background navigation that is still wanted.
+    /// Returns `true` if at least one page was applied.
+    pub fn poll_navigations(&mut self) -> bool {
+        let mut applied = false;
+        while let Some(result) = self.nav.try_recv() {
+            let Some(tab_idx) = self.tabs.iter().position(|t| {
+                t.pending.as_ref().is_some_and(|p| p.nav_id == result.nav_id)
+            }) else {
+                continue; // superseded, stopped, or its tab was closed
+            };
+            if let Some(pending) = self.tabs[tab_idx].pending.take() {
+                self.commit_navigation(tab_idx, pending, result.page);
+                applied = true;
+            }
+        }
+        applied
+    }
+
+    /// Whether the active tab has a navigation in flight.
+    pub fn is_loading(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|t| t.pending.is_some())
+    }
+
+    /// Cancels the active tab's navigation; the current page and history stay unchanged.
+    pub fn stop(&mut self) {
+        let idx = self.active_tab;
+        if self.tabs[idx].pending.take().is_some() {
+            self.url_input = self.tabs[idx].current_url.as_str().to_string();
+            self.status_text = self.base_status_text.clone();
+            self.mark_chrome_repaint();
+        }
+    }
+
+    /// Installs the UI wake-up callback and switches navigation to background threads.
+    pub fn set_waker(&mut self, waker: droplet_platform::Waker) {
+        self.nav.set_waker(waker);
+        self.start_deferred();
+    }
+
+    fn load_url_into_tab(&mut self, tab_idx: usize, url: Url) {
+        self.start_navigation(tab_idx, url, nav::HistoryOp::None, nav::NavRequest::Get, None);
     }
 
     fn apply_loaded_page(
@@ -554,7 +697,7 @@ impl Browser {
         let content_height = compute_content_height(&layout_root);
 
         let internal_page = page.final_url.is_about()
-            && matches!(page.final_url.path.as_str(), "history" | "bookmarks");
+            && matches!(page.final_url.path.as_str(), "history" | "bookmarks" | "blank");
         if page.load_ok && !internal_page {
             self.store.record(page.final_url.as_str(), &title);
         }
@@ -591,19 +734,15 @@ impl Browser {
 
     pub fn go_back(&mut self) {
         let idx = self.active_tab;
-        if let Some(prev) = self.tabs[idx].back_stack.pop() {
-            let curr = self.tabs[idx].current_url.clone();
-            self.tabs[idx].forward_stack.push(curr);
-            self.load_url_into_tab(idx, prev);
+        if let Some(prev) = self.tabs[idx].back_stack.last().cloned() {
+            self.start_navigation(idx, prev, nav::HistoryOp::Back, nav::NavRequest::Get, None);
         }
     }
 
     pub fn go_forward(&mut self) {
         let idx = self.active_tab;
-        if let Some(next) = self.tabs[idx].forward_stack.pop() {
-            let curr = self.tabs[idx].current_url.clone();
-            self.tabs[idx].back_stack.push(curr);
-            self.load_url_into_tab(idx, next);
+        if let Some(next) = self.tabs[idx].forward_stack.last().cloned() {
+            self.start_navigation(idx, next, nav::HistoryOp::Forward, nav::NavRequest::Get, None);
         }
     }
 
@@ -679,12 +818,19 @@ impl Browser {
         self.base_status_text.clear();
         self.status_text.clear();
 
-        if self.tabs[idx].hibernated {
+        if self.tabs[idx].hibernated && self.tabs[idx].pending.is_none() {
             let saved_scroll = self.tabs[idx].scroll_y;
             let url = self.tabs[idx].current_url.clone();
-            self.load_url_into_tab(idx, url);
-            let max_s = self.max_scroll();
-            self.tabs[idx].scroll_y = saved_scroll.clamp(0.0, max_s);
+            self.start_navigation(
+                idx,
+                url,
+                nav::HistoryOp::None,
+                nav::NavRequest::Get,
+                Some(saved_scroll),
+            );
+        } else if let Some(pending) = &self.tabs[idx].pending {
+            self.url_input = pending.url.as_str().to_string();
+            self.status_text = loading_status(&self.tabs[idx]);
         } else {
             self.url_input = self.tabs[idx].current_url.as_str().to_string();
             let status = self.tabs[idx].js.status_summary().unwrap_or_default();
@@ -1142,24 +1288,11 @@ impl Browser {
         let Some(submission) = forms::prepare_submission(doc, trigger, &base) else {
             return;
         };
-        let prev = self.tabs[idx].current_url.clone();
-        self.tabs[idx].back_stack.push(prev);
-        self.tabs[idx].forward_stack.clear();
-        match submission.method {
-            forms::FormMethod::Get => {
-                self.load_url_into_tab(idx, submission.url);
-            }
-            forms::FormMethod::Post => {
-                let page = loader::load_url_document_post(&submission.url, &submission.body, self.js_enabled);
-                let final_url = page.final_url.clone();
-                self.tabs[idx].current_url = final_url.clone();
-                if idx == self.active_tab {
-                    self.url_input = final_url.as_str().to_string();
-                    self.url_focused = false;
-                }
-                self.apply_loaded_page(idx, page, Instant::now());
-            }
-        }
+        let request = match submission.method {
+            forms::FormMethod::Get => nav::NavRequest::Get,
+            forms::FormMethod::Post => nav::NavRequest::Post(submission.body),
+        };
+        self.start_navigation(idx, submission.url, nav::HistoryOp::Push, request, None);
     }
 
     fn activate_control(&mut self, node: NodeId) {
@@ -1850,7 +1983,12 @@ impl Browser {
                 }
             }
             NavKey::Escape => {
-                if self.url_focused {
+                if self.is_loading() && !self.find.open {
+                    // Esc first stops a page load (also closes the address-bar edit).
+                    self.url_focused = false;
+                    self.store.dismiss_autocomplete();
+                    self.stop();
+                } else if self.url_focused {
                     self.store.dismiss_autocomplete();
                     self.url_focused = false;
                     self.url_input = self.active_url_str().to_string();
@@ -2000,6 +2138,7 @@ impl Browser {
     }
 
     pub fn render_into(&mut self, canvas: &mut Canvas) {
+        self.start_deferred();
         self.ensure_find_matches();
 
         let find_highlights: Vec<FindHighlight> = if self.find.open {
@@ -2103,6 +2242,14 @@ impl Browser {
 }
 
 impl PlatformApp for Browser {
+    fn set_waker(&mut self, waker: droplet_platform::Waker) {
+        Browser::set_waker(self, waker);
+    }
+
+    fn poll_background(&mut self) -> bool {
+        self.poll_navigations()
+    }
+
     fn viewport_size(&self) -> (usize, usize) {
         (self.viewport_width, self.viewport_height)
     }
@@ -2266,6 +2413,15 @@ fn relayout_tab_state(tab: &mut TabState, ctx: &StyleContext, page_vh: f32) {
     tab.dirty.paint = false;
     tab.layout_rebuilds += 1;
     tab.display_list_rebuilds += 1;
+}
+
+/// Status line shown while a tab's navigation is in flight.
+fn loading_status(tab: &TabState) -> String {
+    match &tab.pending {
+        Some(p) if !p.url.host.is_empty() => format!("Loading {}…", p.url.host),
+        Some(p) => format!("Loading {}…", p.url.as_str()),
+        None => String::new(),
+    }
 }
 
 pub(crate) fn compute_layout_with_ctx(
@@ -3022,6 +3178,9 @@ mod tests {
     fn only_successful_navigations_are_recorded() {
         let dir = temp_data_dir("success");
         let mut browser = Browser::with_data_dir("about:blank", 1024, 768, &dir);
+        // about:blank (also the placeholder behind a deferred GUI start) is never recorded.
+        assert!(browser.store.history().is_empty());
+        browser.navigate("about:droplet");
         assert_eq!(browser.store.history().len(), 1);
 
         browser.navigate("ftp://example.com");
@@ -3902,5 +4061,207 @@ mod tests {
         assert_eq!(cleared_shm.pixels, expected_after_shm.pixels);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- DROP-110: background navigation ----------------------------------------------
+
+    /// Local HTTP server: `/slow/<title>` answers after `delay`, any other path immediately.
+    /// Serves `conns` connections, then exits.
+    fn slow_server(conns: usize, delay: std::time::Duration) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            for _ in 0..conns {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                if path.starts_with("/slow/") {
+                    std::thread::sleep(delay);
+                }
+                let title = match path.rsplit('/').next() {
+                    Some("ru") => "Привет".to_string(),
+                    Some(other) => other.to_string(),
+                    None => "root".to_string(),
+                };
+                let body = format!("<html><head><title>{title}</title></head><body><p>{title}</p></body></html>");
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+        (base, handle)
+    }
+
+    fn install_test_waker(browser: &mut Browser) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        browser.set_waker(Arc::new(move || {
+            let _ = tx.send(());
+        }));
+        rx
+    }
+
+    const WAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    #[test]
+    fn background_navigation_keeps_ui_responsive_then_commits() {
+        let (base, server) = slow_server(1, std::time::Duration::from_millis(500));
+        let mut browser = test_browser("about:test", 800, 600);
+        let old_title = browser.active_title().to_string();
+        let wake = install_test_waker(&mut browser);
+
+        let start = Instant::now();
+        browser.navigate(&format!("{base}/slow/ru"));
+        assert!(start.elapsed() < std::time::Duration::from_millis(250), "navigate() blocked");
+        assert!(browser.is_loading());
+        assert!(browser.status_text.starts_with("Loading 127.0.0.1"), "{}", browser.status_text);
+        assert!(browser.url_input.ends_with("/slow/ru"));
+        // The old page stays live: scrolling and rendering do not wait for the network.
+        assert_eq!(browser.active_title(), old_title);
+        browser.scroll(40.0);
+        let _ = browser.render();
+        assert!(start.elapsed() < std::time::Duration::from_millis(400));
+        assert!(browser.tabs[0].back_stack.is_empty(), "history must change only on commit");
+
+        wake.recv_timeout(WAKE_TIMEOUT).expect("waker fired");
+        assert!(browser.poll_navigations());
+        assert!(!browser.is_loading());
+        assert_eq!(browser.active_title(), "Привет");
+        assert_eq!(browser.tabs[0].back_stack.len(), 1);
+        assert!(browser.tabs[0].current_url.as_str().ends_with("/slow/ru"));
+        assert_eq!(browser.tabs[0].scroll_y, 0.0);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn superseded_navigation_result_is_dropped() {
+        let (base, server) = slow_server(2, std::time::Duration::from_millis(400));
+        let mut browser = test_browser("about:test", 800, 600);
+        let wake = install_test_waker(&mut browser);
+
+        browser.navigate(&format!("{base}/slow/first"));
+        browser.navigate(&format!("{base}/fast/second"));
+        wake.recv_timeout(WAKE_TIMEOUT).expect("first wake");
+        wake.recv_timeout(WAKE_TIMEOUT).expect("second wake");
+        browser.poll_navigations();
+
+        assert_eq!(browser.active_title(), "second");
+        assert!(!browser.is_loading());
+        // Only the committed navigation touched history.
+        assert_eq!(browser.tabs[0].back_stack.len(), 1);
+        assert_eq!(browser.tabs[0].back_stack[0].as_str(), "about:test");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn escape_stops_loading_and_keeps_page_and_history() {
+        let (base, server) = slow_server(1, std::time::Duration::from_millis(300));
+        let mut browser = test_browser("about:test", 800, 600);
+        let old_title = browser.active_title().to_string();
+        let wake = install_test_waker(&mut browser);
+
+        browser.navigate(&format!("{base}/slow/stopped"));
+        assert!(browser.is_loading());
+        browser.handle_key_navigation(NavKey::Escape);
+        assert!(!browser.is_loading());
+        assert_eq!(browser.url_input, "about:test");
+        assert!(!browser.status_text.starts_with("Loading"));
+
+        wake.recv_timeout(WAKE_TIMEOUT).expect("worker still finishes");
+        assert!(!browser.poll_navigations(), "stopped result must be discarded");
+        assert_eq!(browser.active_title(), old_title);
+        assert!(browser.tabs[0].back_stack.is_empty());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn closing_a_loading_tab_discards_its_result() {
+        let (base, server) = slow_server(1, std::time::Duration::from_millis(300));
+        let mut browser = test_browser("about:test", 800, 600);
+        browser.new_tab("about:droplet");
+        let wake = install_test_waker(&mut browser);
+
+        browser.navigate(&format!("{base}/slow/closed"));
+        assert!(browser.is_loading());
+        browser.close_tab(1);
+        assert_eq!(browser.tabs.len(), 1);
+
+        wake.recv_timeout(WAKE_TIMEOUT).expect("worker finishes");
+        assert!(!browser.poll_navigations());
+        assert_eq!(browser.tabs[0].current_url.as_str(), "about:test");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn background_back_and_forward_update_stacks_on_commit() {
+        let mut browser = test_browser("about:test", 800, 600);
+        browser.navigate("about:droplet");
+        assert_eq!(browser.tabs[0].back_stack.len(), 1);
+        let wake = install_test_waker(&mut browser);
+
+        browser.go_back();
+        assert!(browser.is_loading());
+        assert_eq!(browser.tabs[0].back_stack.len(), 1, "unchanged until commit");
+        wake.recv_timeout(WAKE_TIMEOUT).expect("back wake");
+        assert!(browser.poll_navigations());
+        assert_eq!(browser.tabs[0].current_url.as_str(), "about:test");
+        assert!(browser.tabs[0].back_stack.is_empty());
+        assert_eq!(browser.tabs[0].forward_stack.len(), 1);
+
+        browser.go_forward();
+        wake.recv_timeout(WAKE_TIMEOUT).expect("forward wake");
+        assert!(browser.poll_navigations());
+        assert_eq!(browser.tabs[0].current_url.as_str(), "about:droplet");
+        assert_eq!(browser.tabs[0].back_stack.len(), 1);
+        assert!(browser.tabs[0].forward_stack.is_empty());
+    }
+
+    #[test]
+    fn background_load_into_inactive_tab_commits_without_stealing_focus() {
+        let (base, server) = slow_server(1, std::time::Duration::from_millis(200));
+        let mut browser = test_browser("about:test", 800, 600);
+        let wake = install_test_waker(&mut browser);
+        browser.navigate(&format!("{base}/slow/background"));
+        // Open a second tab (about: page, also async) and stay on it.
+        browser.new_tab("about:blank");
+        wake.recv_timeout(WAKE_TIMEOUT).expect("wake 1");
+        wake.recv_timeout(WAKE_TIMEOUT).expect("wake 2");
+        browser.poll_navigations();
+        assert_eq!(browser.active_tab, 1);
+        assert_eq!(browser.tabs[0].title, "background");
+        assert!(browser.tabs.iter().all(|t| t.pending.is_none()));
+        assert_eq!(browser.url_input, "about:blank");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn deferred_start_loads_in_background_once_waker_is_installed() {
+        let (base, server) = slow_server(1, std::time::Duration::from_millis(200));
+        let url = format!("{base}/slow/ru");
+        let start = Instant::now();
+        let mut browser = Browser::new_deferred(&url, 800, 600);
+        assert!(start.elapsed() < std::time::Duration::from_millis(150), "constructor blocked");
+        assert_eq!(browser.url_input, url);
+        assert_eq!(browser.tabs[0].current_url.as_str(), "about:blank");
+
+        let wake = install_test_waker(&mut browser);
+        assert!(browser.is_loading());
+        wake.recv_timeout(WAKE_TIMEOUT).expect("wake");
+        assert!(browser.poll_navigations());
+        assert_eq!(browser.active_title(), "Привет");
+        assert!(browser.tabs[0].back_stack.is_empty(), "initial load is not a history entry");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn deferred_start_without_waker_loads_before_first_frame() {
+        let mut browser = Browser::new_deferred("about:test", 800, 600);
+        assert_eq!(browser.tabs[0].current_url.as_str(), "about:blank");
+        let _ = browser.render();
+        assert_eq!(browser.tabs[0].current_url.as_str(), "about:test");
+        assert!(!browser.is_loading());
     }
 }

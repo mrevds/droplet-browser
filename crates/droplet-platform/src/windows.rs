@@ -69,6 +69,8 @@ const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEWHEEL: u32 = 0x020A;
 const WM_XBUTTONDOWN: u32 = 0x020B;
+/// Posted by the background waker (DROP-110): apply finished page loads.
+const WM_APP_WAKE: u32 = 0x8000 + 1;
 
 // Mouse X-buttons
 const XBUTTON1: u16 = 0x0001;
@@ -269,6 +271,7 @@ extern "system" {
     fn DispatchMessageW(lp_msg: *const MSG) -> isize;
     fn DefWindowProcW(hwnd: HWND, msg: u32, w_param: usize, l_param: isize) -> isize;
     fn PostQuitMessage(n_exit_code: i32);
+    fn PostMessageW(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> i32;
     fn BeginPaint(hwnd: HWND, lp_paint: *mut PAINTSTRUCT) -> HDC;
     fn EndPaint(hwnd: HWND, lp_paint: *const PAINTSTRUCT) -> i32;
     fn InvalidateRect(hwnd: HWND, lp_rect: *const RECT, b_erase: i32) -> i32;
@@ -938,6 +941,16 @@ unsafe extern "system" fn wnd_proc<A: PlatformApp>(
     }
 
     match msg {
+        WM_APP_WAKE => {
+            let changed = {
+                let state = &mut *state_ptr;
+                state.app.poll_background()
+            };
+            if changed {
+                sync_title_and_invalidate(state_ptr);
+            }
+            0
+        }
         WM_SIZE => {
             let w = (lparam & 0xFFFF) as u16 as usize;
             let h = ((lparam >> 16) & 0xFFFF) as u16 as usize;
@@ -1231,6 +1244,15 @@ pub fn run<A: PlatformApp>(mut app: A) -> Result<(), String> {
             drop(Box::from_raw(state_ptr));
         }
         return Err(format!("CreateWindowExW failed (Win32 error {err})"));
+    }
+
+    // Background work (page loads) wakes the message loop (DROP-110). `PostMessageW` is
+    // thread-safe; the handle travels as an integer because raw pointers are not `Send`.
+    let hwnd_bits = hwnd as usize;
+    unsafe {
+        (*state_ptr).app.set_waker(std::sync::Arc::new(move || {
+            PostMessageW(hwnd_bits as HWND, WM_APP_WAKE, 0, 0);
+        }));
     }
 
     unsafe {

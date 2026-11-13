@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use droplet_gfx::{Canvas, Color, DamageRect};
 
+use crate::linux_wake::{wait_readable, WakePipe};
 use crate::{format_window_title, CaretMove, NavKey, PlatformApp};
 
 const RTLD_LAZY: c_int = 1;
@@ -330,6 +331,7 @@ struct X11Api {
     XSetWMProtocols: unsafe extern "C" fn(*mut Display, Window, *mut Atom, c_int) -> c_int,
     XNextEvent: unsafe extern "C" fn(*mut Display, *mut XEvent) -> c_int,
     XPending: unsafe extern "C" fn(*mut Display) -> c_int,
+    XConnectionNumber: unsafe extern "C" fn(*mut Display) -> c_int,
     XDefaultVisual: unsafe extern "C" fn(*mut Display, c_int) -> *mut Visual,
     XDefaultDepth: unsafe extern "C" fn(*mut Display, c_int) -> c_int,
     XDefaultGC: unsafe extern "C" fn(*mut Display, c_int) -> GC,
@@ -423,6 +425,7 @@ impl X11Api {
                 XSetWMProtocols: load_sym(handle, c"XSetWMProtocols")?,
                 XNextEvent: load_sym(handle, c"XNextEvent")?,
                 XPending: load_sym(handle, c"XPending")?,
+                XConnectionNumber: load_sym(handle, c"XConnectionNumber")?,
                 XDefaultVisual: load_sym(handle, c"XDefaultVisual")?,
                 XDefaultDepth: load_sym(handle, c"XDefaultDepth")?,
                 XDefaultGC: load_sym(handle, c"XDefaultGC")?,
@@ -1085,6 +1088,14 @@ pub(crate) fn run<A: PlatformApp>(app: &mut A) -> Result<(), String> {
         gc,
     };
 
+    // Background work (page loads) wakes the loop through this self-pipe (DROP-110).
+    // Installed before the first frame so a deferred start page loads in the background.
+    let wake = WakePipe::new().ok();
+    if let Some(ref pipe) = wake {
+        app.set_waker(pipe.waker());
+    }
+    let conn_fd = unsafe { (x11.XConnectionNumber)(display) };
+
     let mut fallback_canvas: Option<Canvas> = None;
     if let Some(ref mut shm) = shm_surface {
         Canvas::with_external_slice(
@@ -1109,8 +1120,25 @@ pub(crate) fn run<A: PlatformApp>(app: &mut A) -> Result<(), String> {
     let mut running = true;
 
     while running {
-        unsafe {
-            (x11.XNextEvent)(display, &mut event);
+        // Block until an X event arrives or another thread wakes us.
+        let mut have_event = false;
+        loop {
+            // XPending also flushes queued requests before we sleep.
+            if unsafe { (x11.XPending)(display) } > 0 {
+                unsafe { (x11.XNextEvent)(display, &mut event) };
+                have_event = true;
+                break;
+            }
+            let Some(ref pipe) = wake else {
+                unsafe { (x11.XNextEvent)(display, &mut event) };
+                have_event = true;
+                break;
+            };
+            let [_, woke] = wait_readable([conn_fd, pipe.read_fd()]);
+            if woke && pipe.drain() {
+                app.poll_background();
+                break;
+            }
         }
 
         let mut expose_needed = false;
@@ -1118,6 +1146,9 @@ pub(crate) fn run<A: PlatformApp>(app: &mut A) -> Result<(), String> {
         let mut pending_resize: Option<(usize, usize)> = None;
 
         loop {
+            if !have_event {
+                break; // woken by background work only: skip straight to repaint
+            }
             unsafe {
                 match event.type_ {
                     EXPOSE => {
