@@ -4,14 +4,16 @@ use std::sync::OnceLock;
 use droplet_dom::{Document, ElementData, NodeId, NodeKind};
 
 use crate::computed::{
-    AlignItems, ComputedStyle, Display, EdgeSizes, FlexBasis, FlexDirection, FlexWrap,
-    JustifyContent,
+    AlignItems, ComputedStyle, Display, FlexBasis, FlexDirection, FlexWrap, JustifyContent,
 };
 use crate::css::{
     self, Color, Combinator, ComplexSelector, CompoundSelector, Declaration, Specificity,
     Stylesheet, Unit, Value,
 };
 use crate::rule_index::{AncestorBloom, RuleIndex};
+use crate::shorthand::{
+    self, expand_four_sides, BorderState, ALL_SIDES, SIDE_BOTTOM, SIDE_LEFT, SIDE_RIGHT, SIDE_TOP,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StyleContext {
@@ -268,10 +270,10 @@ struct CascadeContext<'a> {
     active_ancestors: Vec<NodeId>,
 }
 
-struct LengthEnv<'a> {
-    em: f32,
-    rem: f32,
-    ctx: &'a StyleContext,
+pub(crate) struct LengthEnv<'a> {
+    pub(crate) em: f32,
+    pub(crate) rem: f32,
+    pub(crate) ctx: &'a StyleContext,
 }
 
 fn collect_ancestors(doc: &Document, start: Option<NodeId>) -> Vec<NodeId> {
@@ -426,15 +428,15 @@ fn compute_element_style(
         .flat_map(|(_, _, decls)| decls.iter())
         .chain(inline_decls.iter())
     {
-        if decl.name == "font-size" {
-            if let Some(fs) = resolve_font_size(
-                decl,
-                parent_style.font_size,
-                root_font_size,
-                cascade.style_ctx,
-            ) {
-                style.font_size = fs;
-            }
+        let size_value = match decl.name.as_str() {
+            "font-size" => decl.first(),
+            "font" => shorthand::parse_font_shorthand(&decl.values).map(|f| f.size),
+            _ => None,
+        };
+        if let Some(fs) = size_value.and_then(|v| {
+            resolve_font_size(v, parent_style.font_size, root_font_size, cascade.style_ctx)
+        }) {
+            style.font_size = fs;
         }
     }
 
@@ -449,19 +451,20 @@ fn compute_element_style(
         rem: effective_rem,
         ctx: cascade.style_ctx,
     };
-    let mut explicit_border_color = false;
+    let mut border = BorderState::new();
     for decl in ua_matches
         .iter()
         .chain(author_matches.iter())
         .flat_map(|(_, _, decls)| decls.iter())
         .chain(inline_decls.iter())
     {
-        apply_declaration(&mut style, decl, &env, &mut explicit_border_color);
+        if decl.name == "box-sizing" {
+            shorthand::apply_box_sizing(&mut style, &decl.values, parent_style.box_sizing);
+        } else {
+            apply_declaration(&mut style, decl, &env, &mut border);
+        }
     }
-
-    if !explicit_border_color {
-        style.border_color = style.color;
-    }
+    border.finish(&mut style);
 
     style
 }
@@ -623,12 +626,11 @@ fn matches_compound(
 }
 
 fn resolve_font_size(
-    decl: &Declaration,
+    val: &Value,
     parent_font_size: f32,
     root_font_size: f32,
     ctx: &StyleContext,
 ) -> Option<f32> {
-    let val = decl.first()?;
     let px = match val {
         Value::Length(n, Unit::Px) => *n,
         Value::Length(n, Unit::Em) => parent_font_size * n,
@@ -645,6 +647,7 @@ fn resolve_font_size(
             "large" => 18.0,
             "x-large" => 24.0,
             "xx-large" => 32.0,
+            "xxx-large" => 48.0,
             "smaller" => parent_font_size * 0.85,
             "larger" => parent_font_size * 1.2,
             _ => return None,
@@ -654,7 +657,7 @@ fn resolve_font_size(
     Some(px.max(1.0))
 }
 
-fn resolve_length(val: &Value, env: &LengthEnv<'_>) -> Option<f32> {
+pub(crate) fn resolve_length(val: &Value, env: &LengthEnv<'_>) -> Option<f32> {
     match val {
         Value::Length(n, Unit::Px) => Some(*n),
         Value::Length(n, Unit::Em) => Some(n * env.em),
@@ -674,7 +677,7 @@ fn parse_non_neg_number(val: &Value) -> Option<f32> {
     }
 }
 
-fn is_monospace_font(lower: &str) -> bool {
+pub(crate) fn is_monospace_font(lower: &str) -> bool {
     if matches!(
         lower,
         "monospace"
@@ -703,8 +706,9 @@ fn apply_declaration(
     style: &mut ComputedStyle,
     decl: &Declaration,
     env: &LengthEnv<'_>,
-    explicit_border_color: &mut bool,
+    border: &mut BorderState,
 ) {
+    let values = decl.values.as_slice();
     match decl.name.as_str() {
         "display" => {
             if let Some(Value::Keyword(kw)) = decl.first() {
@@ -724,19 +728,9 @@ fn apply_declaration(
             }
         }
         "background-color" => {
-            if let Some(val) = decl.first() {
-                apply_background_value(&mut style.background_color, val);
-            }
+            shorthand::apply_background_color(&mut style.background_color, values)
         }
-        "background" => {
-            for val in &decl.values {
-                if matches!(val, Value::Color(_)) || matches!(val, Value::Keyword(k) if k == "none")
-                {
-                    apply_background_value(&mut style.background_color, val);
-                    break;
-                }
-            }
-        }
+        "background" => shorthand::apply_background(&mut style.background_color, values),
         "margin" => apply_margin_shorthand(style, &decl.values, env),
         "margin-top" => {
             if let Some(v) = decl.first().and_then(|v| resolve_length(v, env)) {
@@ -770,170 +764,57 @@ fn apply_declaration(
                 }
             }
         }
-        "padding" => apply_non_neg_edge_shorthand(&mut style.padding, &decl.values, env),
-        "padding-top" => {
-            if let Some(v) = decl.first().and_then(|v| resolve_length(v, env)) {
-                style.padding.top = v.max(0.0);
-            }
-        }
-        "padding-right" => {
-            if let Some(v) = decl.first().and_then(|v| resolve_length(v, env)) {
-                style.padding.right = v.max(0.0);
-            }
-        }
-        "padding-bottom" => {
-            if let Some(v) = decl.first().and_then(|v| resolve_length(v, env)) {
-                style.padding.bottom = v.max(0.0);
-            }
-        }
-        "padding-left" => {
-            if let Some(v) = decl.first().and_then(|v| resolve_length(v, env)) {
-                style.padding.left = v.max(0.0);
-            }
-        }
-        "border" => {
-            let (width, color) = parse_border_shorthand(&decl.values, env);
-            if let Some(w) = width {
-                style.border = EdgeSizes {
-                    top: w,
-                    right: w,
-                    bottom: w,
-                    left: w,
-                };
-            }
-            if let Some(c) = color {
-                style.border_color = c;
-                *explicit_border_color = true;
-            }
-        }
-        "border-top" => apply_single_border_shorthand(
-            &mut style.border.top,
-            &mut style.border_color,
-            explicit_border_color,
-            &decl.values,
-            env,
-        ),
-        "border-right" => apply_single_border_shorthand(
-            &mut style.border.right,
-            &mut style.border_color,
-            explicit_border_color,
-            &decl.values,
-            env,
-        ),
-        "border-bottom" => apply_single_border_shorthand(
-            &mut style.border.bottom,
-            &mut style.border_color,
-            explicit_border_color,
-            &decl.values,
-            env,
-        ),
-        "border-left" => apply_single_border_shorthand(
-            &mut style.border.left,
-            &mut style.border_color,
-            explicit_border_color,
-            &decl.values,
-            env,
-        ),
-        "border-width" => apply_border_width_shorthand(&mut style.border, &decl.values, env),
+        "padding" => shorthand::apply_padding(&mut style.padding, values, env),
+        "padding-top" => shorthand::apply_padding_side(&mut style.padding.top, values, env),
+        "padding-right" => shorthand::apply_padding_side(&mut style.padding.right, values, env),
+        "padding-bottom" => shorthand::apply_padding_side(&mut style.padding.bottom, values, env),
+        "padding-left" => shorthand::apply_padding_side(&mut style.padding.left, values, env),
+        "border" => shorthand::apply_border(style, border, ALL_SIDES, values, env),
+        "border-top" => shorthand::apply_border(style, border, SIDE_TOP, values, env),
+        "border-right" => shorthand::apply_border(style, border, SIDE_RIGHT, values, env),
+        "border-bottom" => shorthand::apply_border(style, border, SIDE_BOTTOM, values, env),
+        "border-left" => shorthand::apply_border(style, border, SIDE_LEFT, values, env),
+        "border-width" => shorthand::apply_border_width(&mut style.border, values, env),
         "border-top-width" => {
-            if let Some(w) = decl.first().and_then(|v| resolve_border_width(v, env)) {
-                style.border.top = w;
-            }
+            shorthand::apply_border_side_width(&mut style.border.top, values, env)
         }
         "border-right-width" => {
-            if let Some(w) = decl.first().and_then(|v| resolve_border_width(v, env)) {
-                style.border.right = w;
-            }
+            shorthand::apply_border_side_width(&mut style.border.right, values, env)
         }
         "border-bottom-width" => {
-            if let Some(w) = decl.first().and_then(|v| resolve_border_width(v, env)) {
-                style.border.bottom = w;
-            }
+            shorthand::apply_border_side_width(&mut style.border.bottom, values, env)
         }
         "border-left-width" => {
-            if let Some(w) = decl.first().and_then(|v| resolve_border_width(v, env)) {
-                style.border.left = w;
-            }
+            shorthand::apply_border_side_width(&mut style.border.left, values, env)
         }
-        "border-color" => {
-            if let Some(val) = decl.first() {
-                match val {
-                    Value::Color(c) => {
-                        style.border_color = *c;
-                        *explicit_border_color = true;
-                    }
-                    Value::Keyword(k) if k == "currentcolor" => {
-                        *explicit_border_color = false;
-                    }
-                    _ => {}
-                }
-            }
-        }
+        "border-style" => shorthand::apply_border_style(border, ALL_SIDES, values),
+        "border-top-style" => shorthand::apply_border_style(border, SIDE_TOP, values),
+        "border-right-style" => shorthand::apply_border_style(border, SIDE_RIGHT, values),
+        "border-bottom-style" => shorthand::apply_border_style(border, SIDE_BOTTOM, values),
+        "border-left-style" => shorthand::apply_border_style(border, SIDE_LEFT, values),
+        "border-color" => shorthand::apply_border_color(style, border, values),
         "border-radius" => {
             if let Some(v) = decl.first().and_then(|v| resolve_length(v, env)) {
                 style.border_radius = v.max(0.0);
             }
         }
-        "width" => {
-            if let Some(val) = decl.first() {
-                match val {
-                    Value::Keyword(k) if k == "auto" => {
-                        style.width = None;
-                        style.width_pct = None;
-                    }
-                    Value::Length(pct, Unit::Percent) => {
-                        style.width = None;
-                        style.width_pct = Some((*pct).max(0.0));
-                    }
-                    _ => {
-                        if let Some(v) = resolve_length(val, env) {
-                            style.width = Some(v.max(0.0));
-                            style.width_pct = None;
-                        }
-                    }
-                }
+        "width" => shorthand::apply_size(&mut style.width, values, env),
+        "max-width" => shorthand::apply_max_size(&mut style.max_width, values, env),
+        "min-width" => shorthand::apply_min_size(&mut style.min_width, values, env),
+        "min-height" => shorthand::apply_min_size(&mut style.min_height, values, env),
+        "max-height" => shorthand::apply_max_size(&mut style.max_height, values, env),
+        "inset" => shorthand::apply_inset(style, values, env),
+        "top" => shorthand::apply_inset_side(&mut style.inset.top, values, env),
+        "right" => shorthand::apply_inset_side(&mut style.inset.right, values, env),
+        "bottom" => shorthand::apply_inset_side(&mut style.inset.bottom, values, env),
+        "left" => shorthand::apply_inset_side(&mut style.inset.left, values, env),
+        "font" => {
+            if let Some(font) = shorthand::parse_font_shorthand(values) {
+                style.bold = font.bold;
+                style.monospace = font.monospace;
             }
         }
-        "max-width" => {
-            if let Some(val) = decl.first() {
-                match val {
-                    Value::Keyword(k) if k == "none" => {
-                        style.max_width = None;
-                        style.max_width_pct = None;
-                    }
-                    Value::Length(pct, Unit::Percent) => {
-                        style.max_width = None;
-                        style.max_width_pct = Some((*pct).max(0.0));
-                    }
-                    _ => {
-                        if let Some(v) = resolve_length(val, env) {
-                            style.max_width = Some(v.max(0.0));
-                            style.max_width_pct = None;
-                        }
-                    }
-                }
-            }
-        }
-        "height" => {
-            if let Some(val) = decl.first() {
-                match val {
-                    Value::Keyword(k) if k == "auto" => {
-                        style.height = None;
-                        style.height_pct = None;
-                    }
-                    Value::Length(pct, Unit::Percent) => {
-                        style.height = None;
-                        style.height_pct = Some((*pct).max(0.0));
-                    }
-                    _ => {
-                        if let Some(v) = resolve_length(val, env) {
-                            style.height = Some(v.max(0.0));
-                            style.height_pct = None;
-                        }
-                    }
-                }
-            }
-        }
+        "height" => shorthand::apply_size(&mut style.height, values, env),
         "font-weight" => {
             if let Some(val) = decl.first() {
                 match val {
@@ -1072,28 +953,6 @@ fn apply_declaration(
     }
 }
 
-fn apply_background_value(target: &mut Option<Color>, val: &Value) {
-    match val {
-        Value::Color(c) => {
-            *target = if c.a == 0 { None } else { Some(*c) };
-        }
-        Value::Keyword(kw) if kw == "none" || kw == "transparent" => {
-            *target = None;
-        }
-        _ => {}
-    }
-}
-
-fn expand_four_sides<T: Copy>(values: &[T]) -> Option<(T, T, T, T)> {
-    match values.len() {
-        1 => Some((values[0], values[0], values[0], values[0])),
-        2 => Some((values[0], values[1], values[0], values[1])),
-        3 => Some((values[0], values[1], values[2], values[1])),
-        4 => Some((values[0], values[1], values[2], values[3])),
-        _ => None,
-    }
-}
-
 fn apply_margin_shorthand(style: &mut ComputedStyle, values: &[Value], env: &LengthEnv<'_>) {
     #[derive(Clone, Copy)]
     enum MarginVal {
@@ -1146,96 +1005,6 @@ fn apply_margin_shorthand(style: &mut ComputedStyle, values: &[Value], env: &Len
             style.margin.left = 0.0;
             style.margin_left_auto = true;
         }
-    }
-}
-
-fn apply_non_neg_edge_shorthand(edge: &mut EdgeSizes, values: &[Value], env: &LengthEnv<'_>) {
-    let parsed: Option<Vec<f32>> = values
-        .iter()
-        .map(|v| resolve_length(v, env).map(|n| n.max(0.0)))
-        .collect();
-    let Some(parsed) = parsed else {
-        return;
-    };
-    if let Some((t, r, b, l)) = expand_four_sides(&parsed) {
-        edge.top = t;
-        edge.right = r;
-        edge.bottom = b;
-        edge.left = l;
-    }
-}
-
-fn resolve_border_width(val: &Value, env: &LengthEnv<'_>) -> Option<f32> {
-    if let Some(n) = resolve_length(val, env) {
-        return Some(n.max(0.0));
-    }
-    if let Value::Keyword(kw) = val {
-        return match kw.as_str() {
-            "thin" => Some(1.0),
-            "medium" => Some(3.0),
-            "thick" => Some(5.0),
-            "none" | "hidden" => Some(0.0),
-            _ => None,
-        };
-    }
-    None
-}
-
-fn apply_border_width_shorthand(edge: &mut EdgeSizes, values: &[Value], env: &LengthEnv<'_>) {
-    let parsed: Option<Vec<f32>> = values
-        .iter()
-        .map(|v| resolve_border_width(v, env))
-        .collect();
-    let Some(parsed) = parsed else {
-        return;
-    };
-    if let Some((t, r, b, l)) = expand_four_sides(&parsed) {
-        edge.top = t;
-        edge.right = r;
-        edge.bottom = b;
-        edge.left = l;
-    }
-}
-
-fn parse_border_shorthand(values: &[Value], env: &LengthEnv<'_>) -> (Option<f32>, Option<Color>) {
-    let mut width: Option<f32> = None;
-    let mut color: Option<Color> = None;
-    let mut saw_style = false;
-    for val in values {
-        if let Value::Color(c) = val {
-            color = Some(*c);
-        } else if let Some(w) = resolve_border_width(val, env) {
-            width = Some(w);
-        } else if let Value::Keyword(kw) = val {
-            if matches!(
-                kw.as_str(),
-                "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset"
-            ) {
-                saw_style = true;
-            }
-        }
-    }
-    if width.is_none() && saw_style {
-        // CSS default border-width when style is given without width is `medium` (3px)
-        width = Some(3.0);
-    }
-    (width, color)
-}
-
-fn apply_single_border_shorthand(
-    side_width: &mut f32,
-    border_color: &mut Color,
-    explicit_border_color: &mut bool,
-    values: &[Value],
-    env: &LengthEnv<'_>,
-) {
-    let (width, color) = parse_border_shorthand(values, env);
-    if let Some(w) = width {
-        *side_width = w;
-    }
-    if let Some(c) = color {
-        *border_color = c;
-        *explicit_border_color = true;
     }
 }
 
@@ -1326,6 +1095,7 @@ fn apply_flex_shorthand(style: &mut ComputedStyle, values: &[Value], env: &Lengt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::computed::{EdgeSizes, LengthPct};
 
     fn attrs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -1517,23 +1287,17 @@ mod tests {
         assert_eq!(styled_box.style.font_size, 60.0); // 2em of body (30px)
         assert_eq!(styled_box.style.padding.left, 60.0); // 1em of self (60px)
         assert_eq!(styled_box.style.margin.top, 40.0); // 2rem of html (20px)
-        assert_eq!(styled_box.style.width, Some(600.0)); // 50vw of 1200
-        assert_eq!(styled_box.style.width_pct, None);
-        assert_eq!(styled_box.style.height, Some(200.0)); // 25vh of 800
-        assert_eq!(styled_box.style.height_pct, None);
+        assert_eq!(styled_box.style.width, LengthPct::Px(600.0)); // 50vw of 1200
+        assert_eq!(styled_box.style.height, LengthPct::Px(200.0)); // 25vh of 800
         assert_eq!(styled_box.style.border_radius, 10.0); // 0.5rem of 20px
 
         let styled_pct_over_px = &styled_body.children[1];
-        assert_eq!(styled_pct_over_px.style.width, None);
-        assert_eq!(styled_pct_over_px.style.width_pct, Some(50.0));
-        assert_eq!(styled_pct_over_px.style.max_width, Some(640.0));
-        assert_eq!(styled_pct_over_px.style.max_width_pct, None);
-        assert_eq!(styled_pct_over_px.style.height, Some(120.0));
-        assert_eq!(styled_pct_over_px.style.height_pct, None);
+        assert_eq!(styled_pct_over_px.style.width, LengthPct::Percent(50.0));
+        assert_eq!(styled_pct_over_px.style.max_width, LengthPct::Px(640.0));
+        assert_eq!(styled_pct_over_px.style.height, LengthPct::Px(120.0));
 
         let styled_px_over_pct = &styled_body.children[2];
-        assert_eq!(styled_px_over_pct.style.width, Some(180.0));
-        assert_eq!(styled_px_over_pct.style.width_pct, None);
+        assert_eq!(styled_px_over_pct.style.width, LengthPct::Px(180.0));
     }
 
     #[test]
@@ -1728,8 +1492,8 @@ mod tests {
         );
 
         let styled_area = &styled_body.children[1];
-        assert_eq!(styled_area.style.width, Some(240.0));
-        assert_eq!(styled_area.style.height, Some(64.0));
+        assert_eq!(styled_area.style.width, LengthPct::Px(240.0));
+        assert_eq!(styled_area.style.height, LengthPct::Px(64.0));
         assert_eq!(styled_area.style.padding.left, 8.0);
 
         let styled_select = &styled_body.children[2];

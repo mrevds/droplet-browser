@@ -35,12 +35,12 @@ Status values: `done`, `ready`, `blocked`, `frozen` (do not touch until its phas
 | `DROP-121` | P2 | Cascade: `!important`, `inherit`/`initial`/`unset`, custom properties + `var()` | `ready` | — | `08-cascade` | [spec](issues/DROP-121-cascade.md) |
 | `DROP-122` | P2 | `@media` (width/height/orientation/`prefers-color-scheme`/print), `@import`, `@supports` basic | `ready` | — | `07-media`, Wikipedia | [spec](issues/DROP-122-at-rules.md) |
 | `DROP-123` | P2 | Selectors: `:not`, `:nth-child/-of-type`, `:first/last-child`, attribute operators, `+` `~` | `ready` | — | `12-selectors` | [spec](issues/DROP-123-selectors.md) |
-| `DROP-124` | P2 | `box-sizing`, `min/max-width/height`, shorthand audit (margin/padding/border/background/font) | `ready` | — | `09-box-sizing`, rust-lang.org | [spec](issues/DROP-124-box-model.md) |
-| `DROP-130` | P3 | Positioned layout: relative/absolute/fixed/sticky + `z-index` stacking | `blocked` | `DROP-124` | `05-position` | draft |
-| `DROP-131` | P3 | Floats & `clear` | `blocked` | `DROP-124` | `06-float` | draft |
-| `DROP-132` | P3 | Table layout (auto widths, `colspan`/`rowspan`, `border-collapse`) | `blocked` | `DROP-124` | `04-table`, HN | draft |
+| `DROP-124` | P2 | `box-sizing`, `min/max-width/height`, shorthand audit (margin/padding/border/background/font) | `done` | — | `09-box-sizing`, rust-lang.org | [spec](issues/DROP-124-box-model.md) |
+| `DROP-130` | P3 | Positioned layout: relative/absolute/fixed/sticky + `z-index` stacking | `ready` | — | `05-position` | draft |
+| `DROP-131` | P3 | Floats & `clear` | `ready` | — | `06-float` | draft |
+| `DROP-132` | P3 | Table layout (auto widths, `colspan`/`rowspan`, `border-collapse`) | `ready` | — | `04-table`, HN | draft |
 | `DROP-133` | P3 | `overflow` clip/scroll containers, `visibility` | `blocked` | `DROP-130` | `11-overflow` | draft |
-| `DROP-134` | P3 | Margin collapsing, line breaking (UAX #14 subset), `white-space` | `blocked` | `DROP-124` | `01`, Wikipedia | draft |
+| `DROP-134` | P3 | Margin collapsing, line breaking (UAX #14 subset), `white-space` | `ready` | — | `01`, Wikipedia | draft |
 | `DROP-140` | P4 | Italic/oblique + font fallback chains, kerning | `blocked` | Phase 3 | `02-inline` | draft |
 | `DROP-141` | P4 | WebP decoder (lossless + lossy) | `blocked` | Phase 3 | real sites | draft |
 | `DROP-142` | P4 | Image memory budget, lazy decode outside viewport | `blocked` | Phase 3 | Wikipedia RSS `< 40 MB` | draft |

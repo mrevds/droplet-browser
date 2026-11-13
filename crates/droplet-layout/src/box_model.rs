@@ -6,7 +6,7 @@ use droplet_dom::{Document, NodeId};
 use droplet_gfx::font::measure_text_px;
 use droplet_gfx::image::DecodedImage;
 use droplet_gfx::Rect;
-use droplet_style::{ComputedStyle, Display, EdgeSizes, StyledNode};
+use droplet_style::{BoxSizing, ComputedStyle, Display, EdgeSizes, LengthPct, StyledNode};
 
 use crate::forms::{self, ControlBox};
 use crate::{block, flex, replaced};
@@ -163,22 +163,117 @@ pub(crate) fn measure_text(text: &str, style: ComputedStyle) -> f32 {
     measure_text_px(text, style.font_size, style.bold, style.monospace)
 }
 
-pub(crate) fn resolve_width(style: ComputedStyle, containing_width: f32) -> Option<f32> {
-    style
-        .width
-        .or_else(|| style.width_pct.map(|p| (containing_width * (p / 100.0)).max(0.0)))
+/// Horizontal padding + border of `style` (what `box-sizing: border-box` subtracts).
+#[inline]
+pub(crate) fn horizontal_pb(style: ComputedStyle) -> f32 {
+    style.padding.left + style.padding.right + style.border.left + style.border.right
 }
 
-pub(crate) fn resolve_max_width(style: ComputedStyle, containing_width: f32) -> Option<f32> {
+/// Vertical padding + border of `style`.
+#[inline]
+pub(crate) fn vertical_pb(style: ComputedStyle) -> f32 {
+    style.padding.top + style.padding.bottom + style.border.top + style.border.bottom
+}
+
+/// Converts a specified `width`/`height`/`min-*`/`max-*` value to a content-box size.
+/// `pb` is the padding + border actually used on that axis.
+#[inline]
+fn to_content_size(style: ComputedStyle, value: f32, pb: f32) -> f32 {
+    match style.box_sizing {
+        BoxSizing::ContentBox => value.max(0.0),
+        BoxSizing::BorderBox => (value - pb).max(0.0),
+    }
+}
+
+/// Content-box `max-width`, if any.
+pub(crate) fn resolve_max_width_pb(
+    style: ComputedStyle,
+    containing_width: f32,
+    pb: f32,
+) -> Option<f32> {
     style
         .max_width
-        .or_else(|| style.max_width_pct.map(|p| (containing_width * (p / 100.0)).max(0.0)))
+        .resolve(Some(containing_width))
+        .map(|v| to_content_size(style, v, pb))
+}
+
+/// Applies `max-width` then `min-width` (min wins, CSS 2.1 §10.4) to a content width.
+pub(crate) fn clamp_width_pb(
+    style: ComputedStyle,
+    width: f32,
+    containing_width: f32,
+    pb: f32,
+) -> f32 {
+    let mut w = width;
+    if let Some(max) = resolve_max_width_pb(style, containing_width, pb) {
+        w = w.min(max);
+    }
+    if let Some(min) = style.min_width.resolve(Some(containing_width)) {
+        w = w.max(to_content_size(style, min, pb));
+    }
+    w.max(0.0)
+}
+
+pub(crate) fn clamp_width(style: ComputedStyle, width: f32, containing_width: f32) -> f32 {
+    clamp_width_pb(style, width, containing_width, horizontal_pb(style))
+}
+
+/// Used content width for a specified `width` (box-sizing and min/max applied), or `None`
+/// for `width: auto`.
+pub(crate) fn resolve_width_pb(
+    style: ComputedStyle,
+    containing_width: f32,
+    pb: f32,
+) -> Option<f32> {
+    let specified = style.width.resolve(Some(containing_width))?;
+    let content = to_content_size(style, specified, pb);
+    Some(clamp_width_pb(style, content, containing_width, pb))
+}
+
+pub(crate) fn resolve_width(style: ComputedStyle, containing_width: f32) -> Option<f32> {
+    resolve_width_pb(style, containing_width, horizontal_pb(style))
+}
+
+/// Applies `max-height` then `min-height` to a content height. Percentages need a definite
+/// containing height; otherwise they behave as `none` / `0`.
+pub(crate) fn clamp_height_pb(
+    style: ComputedStyle,
+    height: f32,
+    containing_height: Option<f32>,
+    pb: f32,
+) -> f32 {
+    let mut h = height;
+    if let Some(max) = style.max_height.resolve(containing_height) {
+        h = h.min(to_content_size(style, max, pb));
+    }
+    if let Some(min) = style.min_height.resolve(containing_height) {
+        h = h.max(to_content_size(style, min, pb));
+    }
+    h.max(0.0)
+}
+
+pub(crate) fn clamp_height(
+    style: ComputedStyle,
+    height: f32,
+    containing_height: Option<f32>,
+) -> f32 {
+    clamp_height_pb(style, height, containing_height, vertical_pb(style))
+}
+
+/// Used content height for a specified `height`, or `None` for `auto` (or a percentage of an
+/// indefinite containing height).
+pub(crate) fn resolve_height_pb(
+    style: ComputedStyle,
+    containing_height: Option<f32>,
+    pb: f32,
+) -> Option<f32> {
+    let specified = style.height.resolve(containing_height)?;
+    let content = to_content_size(style, specified, pb);
+    Some(clamp_height_pb(style, content, containing_height, pb))
 }
 
 pub(crate) fn resolve_height(style: ComputedStyle, containing_height: Option<f32>) -> Option<f32> {
-    style.height.or_else(|| {
-        containing_height.and_then(|ch| style.height_pct.map(|p| (ch * (p / 100.0)).max(0.0)))
-    })
+    resolve_height_pb(style, containing_height, vertical_pb(style))
 }
 
 pub(crate) fn is_block_level(display: Display) -> bool {
@@ -239,29 +334,20 @@ pub(crate) fn compute_block_horizontal(
     let non_content = padding.left + padding.right + border.left + border.right;
 
     let explicit_w = forced_content_w.or_else(|| resolve_width(style, cw));
-    let max_w = if forced_content_w.is_some() {
-        None
-    } else {
-        resolve_max_width(style, cw)
-    };
-
     let (fixed_left, fixed_right) = fixed_horizontal_margins(style);
-    let content_w = if let Some(w) = explicit_w {
-        let clamped = if let Some(mw) = max_w { w.min(mw) } else { w };
-        clamped.max(0.0)
-    } else {
-        let mut auto_w = (cw - non_content - fixed_left - fixed_right).max(0.0);
-        if let Some(mw) = max_w {
-            if auto_w > mw {
-                auto_w = mw.max(0.0);
-            }
-        }
-        auto_w
+    let content_w = match explicit_w {
+        Some(w) => w.max(0.0),
+        None => clamp_width(style, cw - non_content - fixed_left - fixed_right, cw),
     };
+    // Auto margins absorb the leftover space only when the width is not itself `auto`
+    // (or when min/max changed the auto width).
+    let width_constrained = explicit_w.is_some()
+        || style.max_width != LengthPct::Auto
+        || style.min_width != LengthPct::Auto;
 
     let underflow = cw - non_content - content_w - (fixed_left + fixed_right);
 
-    if explicit_w.is_some() || max_w.is_some() {
+    if width_constrained {
         if margin_left_auto && margin_right_auto {
             if underflow > 0.0 {
                 margin.left = underflow * 0.5;

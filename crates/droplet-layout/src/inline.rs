@@ -7,7 +7,7 @@ use droplet_style::{
 
 use crate::box_model::{
     contains_block, find_last_baseline_offset_from_margin_top, fixed_horizontal_margins,
-    font_scale_for, measure_text, resolve_max_width, resolve_width, shift_layout_box, BoxType,
+    clamp_width, font_scale_for, measure_text, resolve_width, shift_layout_box, BoxType,
     Dimensions, LayoutBox, LayoutCtx,
 };
 use crate::forms;
@@ -61,21 +61,15 @@ fn layout_inline_block_atomic(
     let non_content = pad.left + pad.right + bdr.left + bdr.right;
     let avail_content_w = (avail_w - margin_h - non_content).max(0.0);
 
-    let explicit_w = resolve_width(styled.style, avail_w);
-    let max_w = resolve_max_width(styled.style, avail_w);
-    let content_w = if let Some(w) = explicit_w {
-        let clamped = if let Some(mw) = max_w { w.min(mw) } else { w };
-        clamped.max(0.0)
+    let content_w = if let Some(w) = resolve_width(styled.style, avail_w) {
+        w
     } else {
         let (min_w, max_intrinsic) =
             measure_intrinsic_content_width(ctx, styled, avail_content_w);
-        let mut stf = max_intrinsic
+        let stf = max_intrinsic
             .min(avail_content_w)
             .max(min_w.min(avail_content_w));
-        if let Some(mw) = max_w {
-            stf = stf.min(mw);
-        }
-        stf.max(0.0)
+        clamp_width(styled.style, stf, avail_w)
     };
 
     let container = Rect {
@@ -160,11 +154,8 @@ pub(crate) fn measure_intrinsic_content_width(
             if elem.tag_name.eq_ignore_ascii_case("br") {
                 return (0.0, 0.0);
             }
-            let explicit_w = resolve_width(node.style, avail_w);
-            let max_w = resolve_max_width(node.style, avail_w);
-            if let Some(w) = explicit_w {
-                let clamped = if let Some(mw) = max_w { w.min(mw) } else { w }.max(0.0);
-                return (clamped, clamped);
+            if let Some(w) = resolve_width(node.style, avail_w) {
+                return (w, w);
             }
 
             let child_pad_border = node.style.padding.left
@@ -216,11 +207,10 @@ pub(crate) fn measure_intrinsic_content_width(
                         min_acc += g;
                     }
                 }
-                if let Some(mw) = max_w {
-                    min_acc = min_acc.min(mw);
-                    max_acc = max_acc.min(mw);
-                }
-                return (min_acc.max(0.0), max_acc.max(0.0));
+                return (
+                    clamp_width(node.style, min_acc, avail_w),
+                    clamp_width(node.style, max_acc, avail_w),
+                );
             }
 
             let mut min_res = 0.0_f32;
@@ -261,11 +251,10 @@ pub(crate) fn measure_intrinsic_content_width(
                 }
             }
             max_res = max_res.max(cur_inline_max);
-            if let Some(mw) = max_w {
-                min_res = min_res.min(mw);
-                max_res = max_res.min(mw);
-            }
-            (min_res.max(0.0), max_res.max(0.0))
+            (
+                clamp_width(node.style, min_res, avail_w),
+                clamp_width(node.style, max_res, avail_w),
+            )
         }
         _ => {
             let mut min_res = 0.0_f32;

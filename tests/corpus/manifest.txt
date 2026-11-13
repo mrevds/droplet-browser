@@ -9,7 +9,7 @@
 06-float        wrong  P3  float ignored: text does not wrap around the floated box
 07-media        wrong  P2  @media rules dropped: narrow layout shown at 1024px
 08-cascade      wrong  P2  !important ignored (#a red); var() unsupported (#c has no height)
-09-box-sizing   wrong  P2  box-sizing: border-box ignored (.bb overflows its parent by 40px)
+09-box-sizing   ok     -   -
 10-lists-forms  ok     -   -
 11-overflow     wrong  P3  overflow: hidden does not clip; visibility: hidden still paints
 12-selectors    wrong  P2  :nth-child, :first-child, [attr], :not() do not match

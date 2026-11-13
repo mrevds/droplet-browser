@@ -645,7 +645,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn parse_values(raw: &str) -> Vec<Value> {
+pub(crate) fn parse_values(raw: &str) -> Vec<Value> {
     let mut values = Vec::new();
     let mut p = Parser::new(raw);
 

@@ -55,6 +55,44 @@ pub enum FlexBasis {
     Percent(f32),
 }
 
+/// `box-sizing`: which box `width`/`height` and their `min-`/`max-` limits measure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoxSizing {
+    #[default]
+    ContentBox,
+    BorderBox,
+}
+
+/// A size that is a length, a percentage of the containing block, or absent
+/// (`auto` for `min-*`/insets, `none` for `max-*`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum LengthPct {
+    #[default]
+    Auto,
+    Px(f32),
+    Percent(f32),
+}
+
+impl LengthPct {
+    /// Resolves against `basis`; a percentage with an unknown basis is `None`.
+    pub fn resolve(self, basis: Option<f32>) -> Option<f32> {
+        match self {
+            LengthPct::Auto => None,
+            LengthPct::Px(px) => Some(px),
+            LengthPct::Percent(pct) => basis.map(|b| b * (pct / 100.0)),
+        }
+    }
+}
+
+/// `top`/`right`/`bottom`/`left` (and the `inset` shorthand); used by positioned layout.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct InsetSizes {
+    pub top: LengthPct,
+    pub right: LengthPct,
+    pub bottom: LengthPct,
+    pub left: LengthPct,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EdgeSizes {
     pub top: f32,
@@ -73,12 +111,14 @@ pub struct ComputedStyle {
     pub padding: EdgeSizes,
     pub border: EdgeSizes,
     pub border_radius: f32,
-    pub width: Option<f32>,
-    pub width_pct: Option<f32>,
-    pub max_width: Option<f32>,
-    pub max_width_pct: Option<f32>,
-    pub height: Option<f32>,
-    pub height_pct: Option<f32>,
+    pub width: LengthPct,
+    pub max_width: LengthPct,
+    pub min_width: LengthPct,
+    pub height: LengthPct,
+    pub min_height: LengthPct,
+    pub max_height: LengthPct,
+    pub box_sizing: BoxSizing,
+    pub inset: InsetSizes,
     pub font_size: f32,
     pub bold: bool,
     pub monospace: bool,
@@ -108,12 +148,14 @@ impl Default for ComputedStyle {
             padding: EdgeSizes::default(),
             border: EdgeSizes::default(),
             border_radius: 0.0,
-            width: None,
-            width_pct: None,
-            max_width: None,
-            max_width_pct: None,
-            height: None,
-            height_pct: None,
+            width: LengthPct::Auto,
+            max_width: LengthPct::Auto,
+            min_width: LengthPct::Auto,
+            height: LengthPct::Auto,
+            min_height: LengthPct::Auto,
+            max_height: LengthPct::Auto,
+            box_sizing: BoxSizing::ContentBox,
+            inset: InsetSizes::default(),
             font_size: 16.0,
             bold: false,
             monospace: false,

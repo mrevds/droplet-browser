@@ -11,8 +11,8 @@ use droplet_gfx::{Color, Rect};
 use droplet_style::{Display, EdgeSizes, StyledNode};
 
 use crate::box_model::{
-    fixed_horizontal_margins, measure_text, resolve_height, resolve_max_width, resolve_width,
-    BoxType, Dimensions, LayoutBox, LayoutCtx,
+    clamp_height_pb, clamp_width_pb, fixed_horizontal_margins, measure_text, resolve_height_pb,
+    resolve_width_pb, BoxType, Dimensions, LayoutBox, LayoutCtx,
 };
 
 /// Kinds of interactive control rendered by Droplet.
@@ -274,17 +274,12 @@ pub(crate) fn measure_control_content_width(
     let Some(control) = control_snapshot(ctx.doc, styled.node_id) else {
         return 0.0;
     };
-    if let Some(w) = resolve_width(styled.style, containing_width) {
-        let max_w = resolve_max_width(styled.style, containing_width);
-        return if let Some(m) = max_w { w.min(m) } else { w }.max(0.0);
+    let pb = control_extra_horizontal(ctx.doc, styled);
+    if let Some(w) = resolve_width_pb(styled.style, containing_width, pb) {
+        return w;
     }
     let (intrinsic, _) = intrinsic_content_size(styled, kind, &control);
-    let max_w = resolve_max_width(styled.style, containing_width);
-    if let Some(m) = max_w {
-        intrinsic.min(m).max(0.0)
-    } else {
-        intrinsic
-    }
+    clamp_width_pb(styled.style, intrinsic, containing_width, pb)
 }
 
 pub(crate) fn layout_control_box(
@@ -315,21 +310,11 @@ pub(crate) fn layout_control_box(
 
     let mut margin = styled.style.margin;
     let non_content = padding.left + padding.right + border.left + border.right;
-    let explicit_w = forced_content_w.or_else(|| resolve_width(styled.style, containing_rect.width));
-    let max_w = resolve_max_width(styled.style, containing_rect.width);
-    let content_w = match explicit_w {
-        Some(w) => {
-            let w = if let Some(m) = max_w { w.min(m) } else { w };
-            w.max(0.0)
-        }
-        None => {
-            let w = if let Some(m) = max_w {
-                intrinsic_w.min(m)
-            } else {
-                intrinsic_w
-            };
-            w.max(0.0)
-        }
+    let cw = containing_rect.width;
+    let content_w = match forced_content_w {
+        Some(w) => w.max(0.0),
+        None => resolve_width_pb(styled.style, cw, non_content)
+            .unwrap_or_else(|| clamp_width_pb(styled.style, intrinsic_w, cw, non_content)),
     };
 
     if styled.style.display == Display::Block || styled.style.display == Display::Flex {
@@ -354,10 +339,13 @@ pub(crate) fn layout_control_box(
         }
     }
 
-    let content_h = forced_content_h
-        .or_else(|| resolve_height(styled.style, containing_height))
-        .unwrap_or(intrinsic_h)
-        .max(0.0);
+    let non_content_v = padding.top + padding.bottom + border.top + border.bottom;
+    let content_h = match forced_content_h {
+        Some(h) => h.max(0.0),
+        None => resolve_height_pb(styled.style, containing_height, non_content_v).unwrap_or_else(
+            || clamp_height_pb(styled.style, intrinsic_h, containing_height, non_content_v),
+        ),
+    };
     let content_x = containing_rect.x + margin.left + border.left + padding.left;
     let content_y = border_box_y + border.top + padding.top;
 

@@ -6,8 +6,9 @@ use droplet_style::{
 
 use crate::box_model::{
     box_dispatch, compute_block_horizontal, find_last_baseline_offset_from_margin_top,
-    fixed_horizontal_margins, resolve_height, resolve_max_width, resolve_width, shift_layout_box,
-    BoxType, Dimensions, LayoutBox, LayoutCtx,
+    clamp_height, clamp_height_pb, clamp_width_pb, fixed_horizontal_margins, resolve_height,
+    resolve_max_width_pb, resolve_width_pb, shift_layout_box, BoxType, Dimensions, LayoutBox,
+    LayoutCtx,
 };
 use crate::forms;
 use crate::inline::{layout_inline_sequence, measure_intrinsic_content_width};
@@ -30,6 +31,9 @@ struct FlexItemMeasure<'a> {
     is_text_node: bool,
     base_content_main: f32,
     final_content_main: f32,
+    /// Content-box `min-*`/`max-*` on the main axis (0 / infinity when absent).
+    min_main: f32,
+    max_main: f32,
     cross_pad_border: f32,
     cross_margin: f32,
     flex_grow: f32,
@@ -157,21 +161,45 @@ fn collect_flex_items<'a>(
             )
         };
 
-        // Pass 1: measure base main size
-        let basis_main = match s.flex_basis {
-            FlexBasis::Px(px) => Some(px.max(0.0)),
-            FlexBasis::Percent(pct) => {
-                params.container_main_avail.map(|avail| (avail * (pct / 100.0)).max(0.0))
+        // Main-axis min/max (content box) and the padding + border that border-box removes.
+        let (min_main, max_main) = if params.is_row {
+            (
+                clamp_width_pb(s, 0.0, params.content_w, main_pad_border),
+                resolve_max_width_pb(s, params.content_w, main_pad_border).map_or(
+                    f32::INFINITY,
+                    |m| clamp_width_pb(s, m, params.content_w, main_pad_border),
+                ),
+            )
+        } else {
+            (
+                clamp_height_pb(s, 0.0, params.explicit_h, main_pad_border),
+                clamp_height_pb(s, f32::INFINITY, params.explicit_h, main_pad_border),
+            )
+        };
+        let clamp_main = |v: f32| v.min(max_main).max(min_main).max(0.0);
+
+        // Pass 1: measure base main size (flex-basis follows box-sizing like width/height).
+        let basis_border_box = s.box_sizing == droplet_style::BoxSizing::BorderBox;
+        let basis_to_content = |v: f32| {
+            if basis_border_box {
+                (v - main_pad_border).max(0.0)
+            } else {
+                v.max(0.0)
             }
+        };
+        let basis_main = match s.flex_basis {
+            FlexBasis::Px(px) => Some(basis_to_content(px)),
+            FlexBasis::Percent(pct) => params
+                .container_main_avail
+                .map(|avail| basis_to_content(avail * (pct / 100.0))),
             FlexBasis::Auto => None,
         };
 
         let base_content_main = if let Some(b) = basis_main {
-            b
+            clamp_main(b)
         } else if params.is_row {
-            if let Some(w) = resolve_width(s, params.content_w) {
-                let mw = resolve_max_width(s, params.content_w);
-                if let Some(m) = mw { w.min(m) } else { w }.max(0.0)
+            if let Some(w) = resolve_width_pb(s, params.content_w, main_pad_border) {
+                w
             } else if is_img_element(ctx.doc, child.node_id) {
                 resolve_image_content_size(
                     ctx,
@@ -185,11 +213,7 @@ fn collect_flex_items<'a>(
             } else {
                 let avail_c = (params.content_w - main_pad_border - main_margin).max(0.0);
                 let (_, max_w) = measure_intrinsic_content_width(ctx, child, avail_c);
-                let mut w = max_w.min(avail_c);
-                if let Some(mw) = resolve_max_width(s, params.content_w) {
-                    w = w.min(mw);
-                }
-                w.max(0.0)
+                clamp_main(max_w.min(avail_c))
             }
         } else if let Some(h) = resolve_height(s, params.explicit_h) {
             h.max(0.0)
@@ -211,7 +235,7 @@ fn collect_flex_items<'a>(
                 Some(cross_w),
                 None,
             );
-            tentative.dimensions.content.height.max(0.0)
+            clamp_main(tentative.dimensions.content.height)
         };
 
         let hypothetical_outer_main = base_content_main + main_pad_border + main_margin;
@@ -221,6 +245,8 @@ fn collect_flex_items<'a>(
             is_text_node,
             base_content_main,
             final_content_main: base_content_main,
+            min_main,
+            max_main,
             cross_pad_border,
             cross_margin,
             flex_grow: s.flex_grow.max(0.0),
@@ -291,56 +317,77 @@ fn resolve_line_flex_sizes(
         .container_main_avail
         .unwrap_or(sum_base_outer + total_gaps);
     let free_space = avail_main - (sum_base_outer + total_gaps);
+    let growing = free_space > 0.001;
+    if !growing && free_space >= -0.001 {
+        return;
+    }
 
-    if free_space > 0.001 {
-        let total_grow: f32 = line_indices.iter().map(|&i| items[i].flex_grow).sum();
-        if total_grow > 0.0 {
-            let denom = total_grow.max(1.0);
-            for &i in line_indices {
-                let share = free_space * (items[i].flex_grow / denom);
-                items[i].final_content_main = (items[i].base_content_main + share).max(0.0);
+    // CSS Flexbox §9.7 "resolve flexible lengths": distribute, clamp to min/max, freeze the
+    // violators, repeat with what is left.
+    let factor = |it: &FlexItemMeasure<'_>| {
+        if growing {
+            it.flex_grow
+        } else {
+            it.flex_shrink * it.base_content_main.max(1.0)
+        }
+    };
+    let mut frozen: Vec<bool> = line_indices
+        .iter()
+        .map(|&i| {
+            let it = &items[i];
+            (if growing { it.flex_grow } else { it.flex_shrink }) <= 0.0
+        })
+        .collect();
+    for _ in 0..=n {
+        if frozen.iter().all(|f| *f) {
+            break;
+        }
+        let used: f32 = line_indices
+            .iter()
+            .zip(&frozen)
+            .map(|(&i, &fz)| {
+                let it = &items[i];
+                let main = if fz { it.final_content_main } else { it.base_content_main };
+                it.hypothetical_outer_main - it.base_content_main + main
+            })
+            .sum();
+        let remaining = avail_main - total_gaps - used;
+        let total_factor: f32 = line_indices
+            .iter()
+            .zip(&frozen)
+            .filter(|(_, fz)| !**fz)
+            .map(|(&i, _)| factor(&items[i]))
+            .sum();
+        if total_factor <= 0.0 {
+            break;
+        }
+        // A grow-factor sum below 1 distributes only that fraction of the free space.
+        let denom = if growing { total_factor.max(1.0) } else { total_factor };
+        let mut total_violation = 0.0_f32;
+        let mut clamped_to: Vec<(usize, f32, f32)> = Vec::with_capacity(n);
+        for (pos, &i) in line_indices.iter().enumerate() {
+            if frozen[pos] {
+                continue;
+            }
+            let it = &items[i];
+            let target = it.base_content_main + remaining * (factor(it) / denom);
+            let clamped = target.min(it.max_main).max(it.min_main).max(0.0);
+            total_violation += clamped - target;
+            clamped_to.push((pos, target, clamped));
+        }
+        let done = total_violation.abs() < 0.001;
+        for (pos, target, clamped) in clamped_to {
+            let i = line_indices[pos];
+            items[i].final_content_main = clamped;
+            let freeze = done
+                || (total_violation > 0.0 && clamped > target)
+                || (total_violation < 0.0 && clamped < target);
+            if freeze {
+                frozen[pos] = true;
             }
         }
-    } else if free_space < -0.001 {
-        let mut frozen = vec![false; n];
-        let mut remaining_overflow = -free_space;
-        for _ in 0..n {
-            let total_weight: f32 = line_indices
-                .iter()
-                .enumerate()
-                .filter(|&(pos, &i)| {
-                    !frozen[pos]
-                        && items[i].flex_shrink > 0.0
-                        && items[i].final_content_main > 0.0
-                })
-                .map(|(_, &i)| items[i].flex_shrink * items[i].base_content_main.max(1.0))
-                .sum();
-            if total_weight <= 0.0 || remaining_overflow <= 0.001 {
-                break;
-            }
-            let mut newly_frozen = false;
-            let mut absorbed = 0.0_f32;
-            for (pos, &i) in line_indices.iter().enumerate() {
-                if frozen[pos] || items[i].flex_shrink <= 0.0 || items[i].final_content_main <= 0.0
-                {
-                    continue;
-                }
-                let weight = items[i].flex_shrink * items[i].base_content_main.max(1.0);
-                let delta = remaining_overflow * (weight / total_weight);
-                if delta >= items[i].final_content_main {
-                    absorbed += items[i].final_content_main;
-                    items[i].final_content_main = 0.0;
-                    frozen[pos] = true;
-                    newly_frozen = true;
-                } else {
-                    absorbed += delta;
-                    items[i].final_content_main -= delta;
-                }
-            }
-            remaining_overflow = (remaining_overflow - absorbed).max(0.0);
-            if !newly_frozen {
-                break;
-            }
+        if done {
+            break;
         }
     }
 }
@@ -621,7 +668,8 @@ pub(crate) fn layout_flex(
     let mut items = collect_flex_items(ctx, styled, params);
 
     if items.is_empty() {
-        let content_h = explicit_container_h.unwrap_or(0.0);
+        let content_h = explicit_container_h
+            .unwrap_or_else(|| clamp_height(styled.style, 0.0, containing_height));
         return LayoutBox {
             node_id: Some(styled.node_id),
             dimensions: Dimensions {
@@ -677,7 +725,7 @@ pub(crate) fn layout_flex(
 
     let content_h = match explicit_container_h {
         Some(h) => h.max(inner_h),
-        None => inner_h,
+        None => clamp_height(styled.style, inner_h, containing_height),
     };
 
     LayoutBox {
@@ -709,15 +757,14 @@ fn compute_column_item_cross_width(
     align_items: AlignItems,
 ) -> f32 {
     let s = child.style;
-    if let Some(w) = resolve_width(s, container_w) {
-        let mw = resolve_max_width(s, container_w);
-        return if let Some(m) = mw { w.min(m) } else { w }.max(0.0);
+    if let Some(w) = resolve_width_pb(s, container_w, cross_pad_border) {
+        return w;
     }
     let max_avail = (container_w - cross_pad_border - cross_margin).max(0.0);
     if is_img_element(ctx.doc, child.node_id) {
         return resolve_image_content_size(ctx, child, container_w, None, None, None).width;
     }
-    let mut w = if align_items == AlignItems::Stretch
+    let w = if align_items == AlignItems::Stretch
         && !s.margin_left_auto
         && !s.margin_right_auto
     {
@@ -726,8 +773,5 @@ fn compute_column_item_cross_width(
         let (_, max_intrinsic) = measure_intrinsic_content_width(ctx, child, max_avail);
         max_intrinsic.min(max_avail)
     };
-    if let Some(mw) = resolve_max_width(s, container_w) {
-        w = w.min(mw);
-    }
-    w.max(0.0)
+    clamp_width_pb(s, w, container_w, cross_pad_border)
 }

@@ -19,7 +19,7 @@
 
 | Проблема | Факт |
 | --- | --- |
-| Ядро вёрстки не готово | корпус `tests/corpus`: **4 из 12** страниц `ok`; нет таблиц, `position`, `float`, `@media`, `!important`, `var()`, `box-sizing`, `overflow`, большинства селекторов |
+| Ядро вёрстки не готово | корпус `tests/corpus`: **5 из 12** страниц `ok`; нет таблиц, `position`, `float`, `@media`, `!important`, `var()`, `overflow`, большинства селекторов (`box-sizing`/`min-`/`max-*` — `DROP-124`) |
 | Сеть блокировала окно | навигация синхронная в UI-потоке → окно висит 2–8 с → исправлено в `DROP-110` |
 | TLS был ненадёжен | HN падал с `TLS handshake timed out` на любой паузе > 5 с → `DROP-111`: бюджеты 10/15/15 с, HN 8/10 — как у curl с тем же лимитом |
 | Не было gzip, нет cookies | Wikipedia качалась несжатой (1 066 КБ) → `DROP-112`: 160 КБ, загрузка HTML 1218 → 679 мс; cookies → `DROP-113`: RFC 6265-подмножество, лимиты 50/домен и 3000 всего, persistent-cookies в `cookies.txt` рядом с историей |
@@ -57,10 +57,10 @@
 | CPU конвейер, Wikipedia-статья | `< 40 ms` | ~42 ms ⚠️ (layout 22 ms; было 295 ms до `DROP-120`) |
 | Style, Wikipedia-статья | `< 20 ms` | ~8.5 ms ✅ (`DROP-120`) |
 | Peak RSS, одна простая вкладка | `< 15 MB` | ~14 MB ✅ |
-| Peak RSS, Wikipedia-статья | `< 40 MB` | ~58 MB ❌ |
+| Peak RSS, Wikipedia-статья | `< 40 MB` | ~60 MB ❌ (`ComputedStyle` 148 → 184 байт в `DROP-124`) |
 | UI во время загрузки | не блокируется | не блокируется ✅ (`DROP-110`); окно открывается за ~120 мс |
 | Холостой CPU | ~0% | 0 тиков за 2 с после загрузки (X11 и Wayland) ✅ |
-| Корпус `tests/corpus` | 100% `ok` | 4/12 |
+| Корпус `tests/corpus` | 100% `ok` | 5/12 |
 | YouTube (WebKit-вкладка), PSS | меньше Firefox | 627 МБ vs 979 МБ у Firefox 157 ✅ (`DROP-170`) |
 
 ---

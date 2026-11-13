@@ -4,8 +4,8 @@ use droplet_gfx::Rect;
 use droplet_style::{ComputedStyle, Display, EdgeSizes, StyledNode};
 
 use crate::box_model::{
-    box_dispatch, compute_block_horizontal, contains_block, font_scale_for, is_block_level,
-    measure_text, resolve_height, BoxType, Dimensions, LayoutBox, LayoutCtx,
+    box_dispatch, clamp_height, compute_block_horizontal, contains_block, font_scale_for,
+    is_block_level, measure_text, resolve_height, BoxType, Dimensions, LayoutBox, LayoutCtx,
 };
 use crate::inline;
 
@@ -224,7 +224,7 @@ pub(crate) fn layout_block(
     let inner_height = (cursor_y + prev_margin_bottom - content_y).max(0.0);
     let content_h = match explicit_h {
         Some(h) => h.max(inner_height),
-        None => inner_height,
+        None => clamp_height(styled.style, inner_height, containing_height),
     };
 
     let box_type = match styled.style.display {

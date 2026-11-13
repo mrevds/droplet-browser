@@ -126,13 +126,13 @@ The orchestration layer (`crates/droplet-shell/src/` -> `Browser`) manages multi
 - **CSS Parser (`css.rs`):** `Color`, `Unit` (`Px | Percent | Em | Rem | Vh | Vw`), `Value`, `CompoundSelector` (`tag_name`, `id`, `classes`, `universal`, `hover`, `active`), `ComplexSelector` (`Descendant` / `Child`), `Rule`, `Stylesheet`.
 - **Style Tree (`cascade.rs`, `computed.rs`):**
   - `Display`: `Block | Inline | InlineBlock | Flex | None`.
-  - `ComputedStyle`: derives `Copy` with **zero `HashMap`s** or heap allocations—only typed scalar/enum/edge fields including Flexbox properties.
+  - `ComputedStyle`: derives `Copy` with **zero `HashMap`s** or heap allocations—only typed scalar/enum/edge fields including Flexbox properties, `box_sizing`, sizes as `LengthPct` (`Auto | Px | Percent`: `width`, `height`, `min-/max-width/height`) and `inset` (`top/right/bottom/left`, stored for positioned layout). Shorthand parsing (`padding`, `border*`, `background`, `font`, `inset`) lives in `shorthand.rs` and is all-or-nothing per declaration.
   - `StyleContext`: `{ viewport_width, viewport_height, hovered_node, active_node }` for `vh`/`vw` and `:hover`/`:active` matching; `stylesheet_uses_interaction` skips restyle/relayout on mouse motion for static pages.
   - **Selector matching (`rule_index.rs`, DROP-120):** `RuleIndex` files each selector under its rightmost compound's id, else first class, else tag, else a universal list; per element only rules from its own buckets are matched (results identical to testing every rule). `AncestorBloom`, a 4 KiB counting Bloom filter of ancestor tag/id/class keys kept by the depth-first style walk, rejects descendant/child selectors whose required ancestor keys are absent. Built per style pass (UA index cached once); no per-node memory.
 
 ### 8. Box Layout Engine & Forms (`crates/droplet-layout/src/`)
 - `Rect` / `Dimensions` (`content`, `padding`, `border`, `margin`), `BoxType`, `LayoutBox`.
-- `layout_tree` resolves block widths, auto margins, percentages, inline text wrapping via `font::measure_text_px`, atomic `InlineBlock`, **2-pass Flexbox layout** (`block.rs`, `inline.rs`, `flex.rs`), `<img>` replaced boxes (`replaced.rs`), and HTML form controls (`forms.rs`: `<input type="text|password|checkbox|radio|submit">`, `<textarea>`, `<button>`, `<select>` via `ControlKind` / `ControlBox`).
+- `layout_tree` resolves block widths (`box-sizing`, then `max-*`, then `min-*` via `box_model::resolve_width/height` and `clamp_width/height`), auto margins, percentages, inline text wrapping via `font::measure_text_px`, atomic `InlineBlock`, **2-pass Flexbox layout** (`block.rs`, `inline.rs`, `flex.rs`), `<img>` replaced boxes (`replaced.rs`), and HTML form controls (`forms.rs`: `<input type="text|password|checkbox|radio|submit">`, `<textarea>`, `<button>`, `<select>` via `ControlKind` / `ControlBox`).
 - Hit testing (`hit_test.rs`): `hit_test`, `hit_test_href`, and `hit_test_node` (returns deepest `NodeId` under pointer).
 
 ### 9. Graphics, Font Rasterizer & Display List Paint (`crates/droplet-gfx/`, `crates/droplet-font/`, `crates/droplet-paint/`)

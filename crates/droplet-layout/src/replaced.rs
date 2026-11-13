@@ -7,7 +7,8 @@ use droplet_gfx::Rect;
 use droplet_style::{Display, EdgeSizes, StyledNode};
 
 use crate::box_model::{
-    fixed_horizontal_margins, measure_text, resolve_height, resolve_max_width, resolve_width,
+    clamp_height, clamp_width, fixed_horizontal_margins, measure_text, resolve_height,
+    resolve_width,
     BoxType, Dimensions, LayoutBox, LayoutCtx,
 };
 
@@ -63,7 +64,6 @@ pub(crate) fn resolve_image_content_size(
 
     let css_w = resolve_width(styled.style, containing_width);
     let css_h = resolve_height(styled.style, containing_height);
-    let max_w = resolve_max_width(styled.style, containing_width);
     let attr_w = elem.and_then(|e| e.attr("width")).and_then(img_attr_px);
     let attr_h = elem.and_then(|e| e.attr("height")).and_then(img_attr_px);
 
@@ -93,12 +93,18 @@ pub(crate) fn resolve_image_content_size(
             )
         };
 
-        if let Some(mw) = max_w {
-            if w > mw {
-                w = mw.max(0.0);
-                if given_h.is_none() && iw > 0.0 && ih > 0.0 {
-                    h = (w * ih / iw).max(0.0);
-                }
+        let clamped_w = clamp_width(styled.style, w, containing_width);
+        if (clamped_w - w).abs() > f32::EPSILON {
+            w = clamped_w;
+            if given_h.is_none() && iw > 0.0 && ih > 0.0 {
+                h = (w * ih / iw).max(0.0);
+            }
+        }
+        let clamped_h = clamp_height(styled.style, h, containing_height);
+        if (clamped_h - h).abs() > f32::EPSILON {
+            h = clamped_h;
+            if given_w.is_none() && iw > 0.0 && ih > 0.0 {
+                w = clamp_width(styled.style, h * iw / ih, containing_width);
             }
         }
         ResolvedImageSize {
@@ -112,11 +118,8 @@ pub(crate) fn resolve_image_content_size(
         let label = if alt.is_empty() { "[img]" } else { alt.as_str() };
         let text_w = measure_text(label, styled.style).max(24.0);
         let text_h = line_height_px(styled.style.font_size).max(20.0);
-        let mut w = given_w.unwrap_or(text_w).max(0.0);
-        if let Some(mw) = max_w {
-            w = w.min(mw).max(0.0);
-        }
-        let h = given_h.unwrap_or(text_h).max(0.0);
+        let w = clamp_width(styled.style, given_w.unwrap_or(text_w), containing_width);
+        let h = clamp_height(styled.style, given_h.unwrap_or(text_h), containing_height);
         let needs_default_chrome = given_w.is_none() && given_h.is_none();
         ResolvedImageSize {
             image: None,

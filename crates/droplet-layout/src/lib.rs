@@ -5,6 +5,8 @@ mod forms;
 mod hit_test;
 mod inline;
 mod replaced;
+#[cfg(test)]
+mod sizing_tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;
