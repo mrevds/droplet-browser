@@ -1,0 +1,7 @@
+[package]
+name = "droplet-net"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+droplet-url = { path = "../droplet-url" }

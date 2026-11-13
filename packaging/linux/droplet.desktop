@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Droplet Browser
+GenericName=Web Browser
+Comment=Lightweight graphical web browser engine written in pure Rust
+Exec=droplet %u
+Icon=droplet
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true

@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/droplet-desktop"]
+default-members = [
+    "crates/droplet-url",
+    "crates/droplet-net",
+    "crates/droplet-dom",
+    "crates/droplet-style",
+    "crates/droplet-gfx",
+    "crates/droplet-image",
+    "crates/droplet-font",
+    "crates/droplet-layout",
+    "crates/droplet-paint",
+    "crates/droplet-platform",
+    "crates/droplet-shell",
+    "apps/droplet-desktop",
+]

@@ -1,0 +1,9 @@
+[package]
+name = "droplet-paint"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+droplet-gfx = { path = "../droplet-gfx" }
+droplet-style = { path = "../droplet-style" }
+droplet-layout = { path = "../droplet-layout" }

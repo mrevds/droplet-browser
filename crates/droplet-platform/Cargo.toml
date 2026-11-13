@@ -1,0 +1,9 @@
+[package]
+name = "droplet-platform"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform native graphical windowing backends for Droplet"
+authors = ["Droplet Contributors"]
+
+[dependencies]
+droplet-gfx = { path = "../droplet-gfx" }

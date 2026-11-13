@@ -1,0 +1,9 @@
+[package]
+name = "droplet-layout"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+droplet-dom = { path = "../droplet-dom" }
+droplet-style = { path = "../droplet-style" }
+droplet-gfx = { path = "../droplet-gfx" }

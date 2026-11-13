@@ -1,0 +1,21 @@
+[package]
+name = "droplet-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "droplet"
+path = "src/main.rs"
+
+[dependencies]
+droplet-url = { path = "../../crates/droplet-url" }
+droplet-net = { path = "../../crates/droplet-net" }
+droplet-dom = { path = "../../crates/droplet-dom" }
+droplet-style = { path = "../../crates/droplet-style" }
+droplet-gfx = { path = "../../crates/droplet-gfx" }
+droplet-image = { path = "../../crates/droplet-image" }
+droplet-font = { path = "../../crates/droplet-font" }
+droplet-layout = { path = "../../crates/droplet-layout" }
+droplet-paint = { path = "../../crates/droplet-paint" }
+droplet-platform = { path = "../../crates/droplet-platform" }
+droplet-shell = { path = "../../crates/droplet-shell" }

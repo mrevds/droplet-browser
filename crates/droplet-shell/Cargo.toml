@@ -1,0 +1,16 @@
+[package]
+name = "droplet-shell"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+droplet-url = { path = "../droplet-url" }
+droplet-net = { path = "../droplet-net" }
+droplet-dom = { path = "../droplet-dom" }
+droplet-style = { path = "../droplet-style" }
+droplet-gfx = { path = "../droplet-gfx" }
+droplet-image = { path = "../droplet-image" }
+droplet-font = { path = "../droplet-font" }
+droplet-layout = { path = "../droplet-layout" }
+droplet-paint = { path = "../droplet-paint" }
+droplet-platform = { path = "../droplet-platform" }
