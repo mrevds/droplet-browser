@@ -576,7 +576,9 @@ struct ShmSurface<'a> {
     xext: &'a XExtShmApi,
     display: *mut Display,
     img: *mut XImage,
-    shminfo: XShmSegmentInfo,
+    /// Boxed: `XShmCreateImage` stores a pointer to this struct in `XImage::obdata` and
+    /// `XShmPutImage` reads the segment id through it, so its address must never move.
+    shminfo: Box<XShmSegmentInfo>,
     width: usize,
     height: usize,
     pixel_len: usize,
@@ -595,12 +597,12 @@ impl<'a> ShmSurface<'a> {
     ) -> Option<Self> {
         let byte_len = shm_byte_size(width, height)?;
         let pixel_len = width.checked_mul(height)?;
-        let mut shminfo = XShmSegmentInfo {
+        let mut shminfo = Box::new(XShmSegmentInfo {
             shmseg: 0,
             shmid: -1,
             shmaddr: ptr::null_mut(),
             read_only: 0,
-        };
+        });
 
         let img = unsafe {
             (xext.XShmCreateImage)(
@@ -609,7 +611,7 @@ impl<'a> ShmSurface<'a> {
                 depth as c_uint,
                 Z_PIXMAP,
                 ptr::null_mut(),
-                &mut shminfo,
+                &mut *shminfo,
                 width as c_uint,
                 height as c_uint,
             )
@@ -656,7 +658,7 @@ impl<'a> ShmSurface<'a> {
 
         XSHM_ERROR_FLAG.store(false, Ordering::SeqCst);
         let prev_handler = unsafe { (x11.XSetErrorHandler)(Some(shm_error_handler)) };
-        let attach_ok = unsafe { (xext.XShmAttach)(display, &mut shminfo) };
+        let attach_ok = unsafe { (xext.XShmAttach)(display, &mut *shminfo) };
         unsafe {
             (x11.XSync)(display, 0);
             (x11.XSetErrorHandler)(prev_handler);
@@ -718,7 +720,7 @@ impl Drop for ShmSurface<'_> {
     fn drop(&mut self) {
         if self.attached {
             unsafe {
-                (self.xext.XShmDetach)(self.display, &mut self.shminfo);
+                (self.xext.XShmDetach)(self.display, &mut *self.shminfo);
                 (self.x11.XSync)(self.display, 0);
             }
             self.attached = false;
