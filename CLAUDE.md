@@ -44,7 +44,7 @@ DROPLET_BLESS=1 /home/mrevds/.cargo/bin/cargo test -p droplet-desktop --test cor
 ## Architecture & Engineering Principles
 
 1. **Zero Bloat / Zero External Dependencies**
-   - Every workspace crate keeps its `[dependencies]` section limited to other local `droplet-*` crates—no external crates. Pure Rust `std` plus runtime dynamic loading (`dlopen` on Linux for `libX11.so.6`, `libwayland-client.so.0`, and `libssl.so.4`/`.3`/`.so`; Win32 `StretchDIBits`/Schannel on Windows).
+   - Every workspace crate keeps its `[dependencies]` section limited to other local `droplet-*` crates—no external crates. Pure Rust `std` plus runtime dynamic loading (`dlopen` on Linux for `libX11.so.6`, `libwayland-client.so.0`, `libssl.so.4`/`.3`/`.so`, and—only inside the `droplet-webview` helper process—GTK 3 + WebKitGTK 4.1 for script-heavy sites, see DROP-170; Win32 `StretchDIBits`/Schannel on Windows).
    - Do not add heavy frameworks, async runtimes (`tokio`), proc-macro graphs, or `Cargo.toml` bloat. Prefer clean pure-Rust implementations (e.g., `sfnt`/`glyf`, PNG/JPEG/BMP/PPM/SVG, `TrackerFilter`, bytecode VM) or zero-link runtime OS bindings.
 2. **Linux + Windows Cross-Platform Discipline**
    - Isolate all OS-specific windowing, event loops, framebuffer blitting, and native FFI inside `crates/droplet-platform/src/` (`lib.rs`, `linux_x11.rs`, `linux_wayland.rs`, `windows.rs`, `macos.rs`, `clipboard.rs`) using `#[cfg(target_os = ...)]`. `crates/droplet-platform/src/lib.rs` owns the `PlatformApp`/`NavKey` contract and `run` dispatch.

@@ -2,10 +2,17 @@
 name = "droplet-desktop"
 version = "0.1.0"
 edition = "2021"
+default-run = "droplet"
 
 [[bin]]
 name = "droplet"
 path = "src/main.rs"
+
+# Out-of-process WebKitGTK host for script-heavy sites (DROP-170). No crate dependencies:
+# GTK 3 / WebKitGTK 4.1 / GLib are loaded with dlopen at runtime.
+[[bin]]
+name = "droplet-webview"
+path = "src/bin/droplet-webview/main.rs"
 
 [dependencies]
 droplet-url = { path = "../../crates/droplet-url" }

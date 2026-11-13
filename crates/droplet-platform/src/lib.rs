@@ -54,6 +54,17 @@ pub enum NavKey {
     ToggleInspector,
 }
 
+/// A foreign native window (an out-of-process web view, DROP-170) that the backend shows
+/// over part of the browser window. On X11 `handle` is the client's XEmbed window id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddedView {
+    pub handle: u64,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Caret movement requested from a native keyboard backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaretMove {
@@ -117,6 +128,15 @@ pub trait PlatformApp {
     /// Apps that never receive a waker must do all work synchronously.
     fn set_waker(&mut self, _waker: Waker) {}
 
+    /// Called once, before [`PlatformApp::set_waker`], by backends that can host foreign
+    /// windows: the native handle of the browser window (X11 `Window`), for `--embed`.
+    fn set_embed_parent(&mut self, _handle: u64) {}
+    /// The foreign view to show right now (active tab), or `None` to hide any.
+    /// Polled after every event batch; the backend maps, moves and focuses it.
+    fn embedded_view(&self) -> Option<EmbeddedView> {
+        None
+    }
+
     /// Called on the UI thread after the waker fired: apply finished background work.
     /// Returns `true` if anything changed (the backend then repaints if `needs_repaint`).
     fn poll_background(&mut self) -> bool {
@@ -145,6 +165,18 @@ pub(crate) fn wayland_candidate(
     wayland_display_present && xdg_runtime_dir_present && library_available
 }
 
+/// Backend choice on Linux. X11 (also through XWayland) is the maintained backend and the
+/// only one that can embed WebKit views (DROP-170), so it wins whenever `$DISPLAY` is set;
+/// the frozen Wayland backend is used without X or when `DROPLET_BACKEND=wayland`.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn prefer_wayland(backend_env: Option<&str>, display_present: bool) -> bool {
+    match backend_env {
+        Some("wayland") => true,
+        Some("x11") => false,
+        _ => !display_present,
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn backend_error_message(wayland_error: Option<&str>, x11_error: &str) -> String {
     match wayland_error {
@@ -161,7 +193,10 @@ pub(crate) fn backend_error_message(wayland_error: Option<&str>, x11_error: &str
 pub fn run<A: PlatformApp>(mut app: A) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let candidate = wayland_candidate(
+        let candidate = prefer_wayland(
+            std::env::var("DROPLET_BACKEND").ok().as_deref(),
+            env_var_nonempty("DISPLAY"),
+        ) && wayland_candidate(
             env_var_nonempty("WAYLAND_DISPLAY"),
             env_var_nonempty("XDG_RUNTIME_DIR"),
             linux_wayland::library_available(),
@@ -252,6 +287,15 @@ pub(crate) fn decode_utf16_unit(pending_surrogate: &mut Option<u16>, unit: u16) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn x11_preferred_when_display_present() {
+        assert!(!prefer_wayland(None, true)); // GNOME/KDE Wayland session with XWayland
+        assert!(prefer_wayland(None, false)); // pure Wayland, no X server
+        assert!(prefer_wayland(Some("wayland"), true));
+        assert!(!prefer_wayland(Some("x11"), false));
+        assert!(!prefer_wayland(Some("bogus"), true));
+    }
 
     #[test]
     fn format_window_title_handles_empty_unicode_and_nul() {

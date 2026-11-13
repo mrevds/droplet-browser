@@ -27,7 +27,8 @@ It is a Cargo workspace of focused engine crates with **zero external crate depe
   - Minimalist `30px` tab strip + `44px` toolbar + floating hover URL pill (`STATUS_BAR_HEIGHT = 0`), persistent bookmarks & history (`crates/droplet-storage`, `about:history`, `about:bookmarks`) with URL autocomplete, Find-in-Page (`Ctrl+F`), and Box Model Inspector (`Ctrl+Shift+I`).
   - Automatic **Tab Hibernation** beyond 3 warm tabs (`MAX_WARM_TABS = 3`), Arena DOM (`Vec<Node>`), flat `Vec` attributes, and `Copy` `ComputedStyle` (zero `HashMap` per element).
 - **Zero-Copy Windowing & Multi-Process Sandbox (`crates/droplet-platform/`, `crates/droplet-sandbox/`, `crates/droplet-ipc/`):**
-  - **Linux:** native **Wayland** (`wl_shm` + `xdg-shell` with `wl_surface.damage_buffer`, falling back automatically to **X11** `MIT-SHM` / `XPutImage`).
+  - **Linux:** **X11** `MIT-SHM` / `XPutImage` (default whenever `$DISPLAY` is set, XWayland included), native **Wayland** (`wl_shm` + `xdg-shell`) without X or with `DROPLET_BACKEND=wayland`.
+- **Hybrid engine (DROP-170):** documents render with Droplet's own engine; script-heavy sites (YouTube, Google, Telegram, VK, GitHub…; extend in `~/.config/droplet/webkit-sites`, `*` = all; `DROPLET_WEBKIT=all|off`) open in a tab backed by the out-of-process `droplet-webview` helper (system WebKitGTK 4.1 via `dlopen`, embedded with XEmbed). Hibernating such a tab ends its WebKit process. Video needs `gstreamer1.0-plugins-bad` + `gstreamer1.0-libav`.
   - **Windows:** Win32 `CreateWindowExW` with persistent `DIBSection` direct rendering + `DamageRect` `BitBlt` (`StretchDIBits` fallback).
   - **macOS:** Cocoa/AppKit `NSView` + `CGContextClipToRect` dirty-rect presentation (verified via cross-compilation for `aarch64-apple-darwin`).
   - **Experimental sandboxed renderer worker (`cargo build --features sandbox`; `--sandbox-screenshot` / `--renderer`; not yet used by the GUI):** privileged `RendererHost` pre-fetches resources over `droplet-net` and communicates with an isolated `HeadlessRenderer` worker over framed `DRIP` IPC + `memfd`/Win32 shared memory (`droplet-ipc`) under `droplet-sandbox` (Linux `seccomp-bpf` + best-effort user/net namespaces + `rlimit`; Windows Job Objects + Restricted Token; macOS `sandbox_init`).
@@ -54,9 +55,10 @@ crates/droplet-paint/     Flat display list, chrome, find/inspector/form overlay
 crates/droplet-platform/  Wayland, X11, Win32, macOS windowing & clipboard backends
 crates/droplet-storage/   Persistent binary/flat-file history, bookmarks & URL autocomplete store
 crates/droplet-shell/     Multi-tab browser session, loader, forms, find, JS DOM host & zero-IO HeadlessRenderer
+apps/droplet-desktop/src/bin/droplet-webview/  WebKitGTK host process (dlopen, XEmbed)
 ```
 
-`Cargo.toml` is a virtual workspace covering all crates above plus `apps/droplet-desktop`.
+`Cargo.toml` is a virtual workspace covering all crates above plus `apps/droplet-desktop` (binaries `droplet` and `droplet-webview`).
 
 ---
 
@@ -64,7 +66,8 @@ crates/droplet-shell/     Multi-tab browser session, loader, forms, find, JS DOM
 
 ### Prerequisites
 - Rust toolchain (`/home/mrevds/.cargo/bin/cargo` / `rustc`)
-- **Linux GUI:** Wayland (`libwayland-client.so.0`) or X11 (`libX11.so.6`, optional `libXext.so.6` for `MIT-SHM`); `libssl.so.4`/`.3`/`.so` for `https://`
+- **Linux GUI:** X11 (`libX11.so.6`, optional `libXext.so.6` for `MIT-SHM`) or Wayland (`libwayland-client.so.0`); `libssl.so.4`/`.3`/`.so` for `https://`
+- **Optional, for YouTube/mail/messengers:** WebKitGTK 4.1 (`libwebkit2gtk-4.1.so.0`, GTK 3); for video also `gstreamer1.0-plugins-bad gstreamer1.0-libav`
 - **Windows GUI:** Win32 (`user32.dll`, `gdi32.dll`, `secur32.dll`, `crypt32.dll`)
 - Headless CLI modes (`--dump-dom`, `--dump-layout`, `--screenshot`) run without any display server.
 

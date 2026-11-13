@@ -8,6 +8,7 @@ pub mod loader;
 pub mod nav;
 pub mod renderer;
 pub mod tab;
+pub mod webview;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -114,6 +115,8 @@ pub struct Browser {
     nav: nav::Navigator,
     /// Initial URL of a GUI browser, loaded once the event loop exists (see `new_deferred`).
     deferred_start: Option<String>,
+    /// Native browser window that WebKit helpers embed into (DROP-170); `None` headless.
+    embed_parent: Option<u64>,
 }
 
 impl Browser {
@@ -202,6 +205,7 @@ impl Browser {
             js_enabled: options.js,
             nav: nav::Navigator::new(),
             deferred_start: None,
+            embed_parent: None,
         };
 
         browser.load_input_into_tab(0, initial_url, false);
@@ -534,6 +538,11 @@ impl Browser {
             self.url_input = url.as_str().to_string();
             self.url_focused = false;
         }
+        if request == nav::NavRequest::Get && self.route_to_webview(tab_idx, &url, history) {
+            return;
+        }
+        // Leaving WebKit territory from the address bar: the helper is no longer needed.
+        self.tabs[tab_idx].webview = None;
         let pending = nav::PendingNav {
             nav_id: self.nav.next_id(),
             url: url.clone(),
@@ -568,6 +577,132 @@ impl Browser {
                 }
             }
         }
+    }
+
+    /// Opens `url` in the tab's WebKit view when the site needs a full web platform and the
+    /// platform can embed one. Returns `false` to let Droplet's own engine load it.
+    fn route_to_webview(&mut self, tab_idx: usize, url: &Url, history: nav::HistoryOp) -> bool {
+        let Some(parent) = self.embed_parent else {
+            return false;
+        };
+        if !webview::wants_webview(url) {
+            return false;
+        }
+        let waker = self.nav.waker();
+        let tab = &mut self.tabs[tab_idx];
+        tab.pending = None;
+        match tab.webview.as_mut() {
+            Some(view) => view.load(url.as_str()),
+            None => match webview::WebView::spawn(parent, url.as_str(), waker) {
+                Ok(view) => {
+                    // The previous Droplet-rendered page is history now: free it.
+                    tab.clear_warm_payload();
+                    tab.webview = Some(view);
+                }
+                Err(err) => {
+                    eprintln!("droplet: WebKit view unavailable ({err}); using built-in engine");
+                    return false;
+                }
+            },
+        }
+        let previous = tab.current_url.clone();
+        match history {
+            nav::HistoryOp::Push if previous.as_str() != url.as_str() => {
+                tab.back_stack.push(previous);
+                tab.forward_stack.clear();
+            }
+            nav::HistoryOp::Back => {
+                tab.back_stack.pop();
+                tab.forward_stack.push(previous);
+            }
+            nav::HistoryOp::Forward => {
+                tab.forward_stack.pop();
+                tab.back_stack.push(previous);
+            }
+            _ => {}
+        }
+        tab.hibernated = false;
+        tab.current_url = url.clone();
+        tab.title = url.host.clone();
+        tab.scroll_y = 0.0;
+        tab.content_height = 0.0;
+        if tab_idx == self.active_tab {
+            self.status_text = "WebKit: загрузка…".to_string();
+            self.base_status_text.clear();
+            self.mark_full_repaint();
+        }
+        self.enforce_warm_tab_limit();
+        true
+    }
+
+    /// Applies events from WebKit helpers (title, URL, load state, crash).
+    /// Returns `true` if anything visible changed.
+    pub fn poll_webviews(&mut self) -> bool {
+        let mut changed = false;
+        for idx in 0..self.tabs.len() {
+            let Some(view) = self.tabs[idx].webview.as_mut() else {
+                continue;
+            };
+            let events = view.drain();
+            for event in events {
+                changed = true;
+                let active = idx == self.active_tab;
+                match event {
+                    webview::WebViewEvent::Uri(raw) => {
+                        if let Ok(url) = Url::parse(&raw) {
+                            self.tabs[idx].current_url = url;
+                            if active && !self.url_focused {
+                                self.url_input = raw;
+                            }
+                        }
+                    }
+                    webview::WebViewEvent::Title(title) if !title.is_empty() => {
+                        self.tabs[idx].title = title;
+                    }
+                    webview::WebViewEvent::Started if active => {
+                        self.status_text = "WebKit: загрузка…".to_string();
+                    }
+                    webview::WebViewEvent::Finished => {
+                        let tab = &self.tabs[idx];
+                        self.store.record(tab.current_url.as_str(), &tab.title);
+                        if active {
+                            self.status_text.clear();
+                        }
+                    }
+                    webview::WebViewEvent::Exited => {
+                        self.tabs[idx].webview = None;
+                        self.tabs[idx].title = "WebKit-вкладка завершилась".to_string();
+                        if active {
+                            self.status_text =
+                                "Процесс WebKit завершился — F5, чтобы перезагрузить".to_string();
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if changed {
+            self.mark_full_repaint();
+        }
+        changed
+    }
+
+    /// The active tab's WebKit window and where to show it (below the chrome).
+    pub fn embedded_view(&self) -> Option<droplet_platform::EmbeddedView> {
+        let handle = self.tabs.get(self.active_tab)?.webview.as_ref()?.handle?;
+        let top = CHROME_HEIGHT.min(self.viewport_height);
+        let height = self
+            .viewport_height
+            .saturating_sub(CHROME_HEIGHT + STATUS_BAR_HEIGHT)
+            .max(1);
+        Some(droplet_platform::EmbeddedView {
+            handle,
+            x: 0,
+            y: top as i32,
+            width: self.viewport_width.max(1) as u32,
+            height: height as u32,
+        })
     }
 
     /// Applies a finished navigation: history op, URL, page, scroll restore.
@@ -641,6 +776,9 @@ impl Browser {
     /// Cancels the active tab's navigation; the current page and history stay unchanged.
     pub fn stop(&mut self) {
         let idx = self.active_tab;
+        if let Some(view) = self.tabs[idx].webview.as_mut() {
+            view.stop();
+        }
         if self.tabs[idx].pending.take().is_some() {
             self.url_input = self.tabs[idx].current_url.as_str().to_string();
             self.status_text = self.base_status_text.clone();
@@ -734,6 +872,10 @@ impl Browser {
 
     pub fn go_back(&mut self) {
         let idx = self.active_tab;
+        if let Some(view) = self.tabs[idx].webview.as_mut() {
+            view.back();
+            return;
+        }
         if let Some(prev) = self.tabs[idx].back_stack.last().cloned() {
             self.start_navigation(idx, prev, nav::HistoryOp::Back, nav::NavRequest::Get, None);
         }
@@ -741,6 +883,10 @@ impl Browser {
 
     pub fn go_forward(&mut self) {
         let idx = self.active_tab;
+        if let Some(view) = self.tabs[idx].webview.as_mut() {
+            view.forward();
+            return;
+        }
         if let Some(next) = self.tabs[idx].forward_stack.last().cloned() {
             self.start_navigation(idx, next, nav::HistoryOp::Forward, nav::NavRequest::Get, None);
         }
@@ -748,6 +894,10 @@ impl Browser {
 
     pub fn reload(&mut self) {
         let idx = self.active_tab;
+        if let Some(view) = self.tabs[idx].webview.as_mut() {
+            view.reload();
+            return;
+        }
         let url = self.tabs[idx].current_url.clone();
         self.load_url_into_tab(idx, url);
     }
@@ -2247,7 +2397,16 @@ impl PlatformApp for Browser {
     }
 
     fn poll_background(&mut self) -> bool {
-        self.poll_navigations()
+        let navigated = self.poll_navigations();
+        self.poll_webviews() || navigated
+    }
+
+    fn set_embed_parent(&mut self, handle: u64) {
+        self.embed_parent = Some(handle);
+    }
+
+    fn embedded_view(&self) -> Option<droplet_platform::EmbeddedView> {
+        Browser::embedded_view(self)
     }
 
     fn viewport_size(&self) -> (usize, usize) {

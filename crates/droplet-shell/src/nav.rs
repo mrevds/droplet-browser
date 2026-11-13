@@ -86,6 +86,10 @@ impl Navigator {
         self.waker = Some(waker);
     }
 
+    pub(crate) fn waker(&self) -> Option<Waker> {
+        self.waker.clone()
+    }
+
     pub(crate) fn next_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id

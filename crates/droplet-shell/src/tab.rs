@@ -87,6 +87,8 @@ pub struct TabState {
     /// Navigation started but not yet committed (DROP-110). The visible page stays the
     /// previous one until the result arrives.
     pub pending: Option<PendingNav>,
+    /// Out-of-process WebKit view showing this tab instead of Droplet's engine (DROP-170).
+    pub webview: Option<crate::webview::WebView>,
 }
 
 impl TabState {
@@ -115,6 +117,7 @@ impl TabState {
             layout_rebuilds: 0,
             display_list_rebuilds: 0,
             pending: None,
+            webview: None,
         }
     }
 
@@ -122,6 +125,7 @@ impl TabState {
     /// and JS runtime state, marking the tab as hibernated while retaining its URL, title,
     /// and navigation stacks.
     pub fn clear_warm_payload(&mut self) {
+        self.webview = None; // ends the helper process and frees its memory
         self.doc = None;
         self.stylesheet = None;
         self.images.clear();

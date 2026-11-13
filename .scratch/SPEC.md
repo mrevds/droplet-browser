@@ -51,7 +51,12 @@ Status values: `done`, `ready`, `blocked`, `frozen` (do not touch until its phas
 | `DROP-160` | P6 | Forms complete (encodings, checkbox/radio, `select multiple`) | `blocked` | Phase 5 | — | draft |
 | `DROP-161` | P6 | Downloads | `blocked` | Phase 5 | — | draft |
 | `DROP-162` | P6 | Session restore | `blocked` | Phase 5 | — | draft |
-| `DROP-170` | P7 | ADR: JavaScript strategy (no-JS by design vs real engine) | `frozen` | Phase 6 | — | draft |
+| `DROP-170` | P7 | ADR: hybrid engine — own engine for documents, WebKitGTK (`dlopen`, out-of-process `droplet-webview`, XEmbed) for script-heavy sites; prototype | `done` | — | YouTube (screenshot + PSS) | [ADR](issues/DROP-170-hybrid-engine.md) |
+| `DROP-171` | P7 | Hybrid UX: click in WebKit view unfocuses address bar, autocomplete not hidden behind view, WebKit downloads/new-window/`target=_blank` → Droplet tabs | `ready` | — | YouTube, Gmail | draft |
+| `DROP-172` | P7 | Ad/tracker blocking in WebKit tabs via WebKit content filters (reuse `TrackerFilter` lists) | `ready` | — | YouTube, news sites | draft |
+| `DROP-173` | P7 | Hibernation policy for WebKit tabs: never freeze a tab playing audio; memory pressure → freeze oldest | `ready` | — | YouTube music in background | draft |
+| `DROP-174` | P7 | Engine switch UI: badge in address bar, per-site toggle written to `webkit-sites` | `ready` | — | — | draft |
+| `DROP-175` | P7 | Codec check: detect missing GStreamer elements, show a one-line hint (`apt install gstreamer1.0-plugins-bad gstreamer1.0-libav`) | `ready` | — | YouTube video | draft |
 | `DROP-180` | P8 | Sandbox wired into the GUI process | `frozen` | Phase 6 | — | draft |
 | `DROP-181` | P8 | Parser fuzzing harness (HTML/CSS/PNG/JPEG/TLS records), no deps | `frozen` | Phase 6 | — | draft |
 | `DROP-182` | P8 | `unsafe` audit (~400 sites) | `frozen` | Phase 6 | — | draft |
@@ -59,12 +64,16 @@ Status values: `done`, `ready`, `blocked`, `frozen` (do not touch until its phas
 | `DROP-191` | P9 | Wayland parity with X11 | `frozen` | Phase 6 | all | draft |
 | `DROP-192` | P9 | macOS (needs a macOS host) | `frozen` | Phase 6 | all | draft |
 
+Phase 7 (hybrid engine) was pulled forward by DROP-170: the user's goal is a full Firefox
+replacement, which is impossible without it. P7 tickets touch `droplet-webview`, `webview.rs`
+and the X11 embedding only, so they may run in parallel with P1–P3 work.
+
 Phase 1 and Phase 2 tickets are independent of each other and may run in parallel —
 **each on its own branch/worktree**, never in one shared dirty checkout.
 
 ## Frozen code
 
-No feature work until its phase: `crates/droplet-js` (P7), `crates/droplet-sandbox` and
+No feature work until its phase: `crates/droplet-js` (superseded by the hybrid engine, DROP-170), `crates/droplet-sandbox` and
 `crates/droplet-ipc` (P8), `crates/droplet-platform/src/linux_wayland.rs` and `macos.rs` (P9).
 Build fixes are allowed.
 

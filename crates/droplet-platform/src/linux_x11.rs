@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use droplet_gfx::{Canvas, Color, DamageRect};
 
 use crate::linux_wake::{wait_readable, WakePipe};
-use crate::{format_window_title, CaretMove, NavKey, PlatformApp};
+use crate::{format_window_title, CaretMove, EmbeddedView, NavKey, PlatformApp};
 
 const RTLD_LAZY: c_int = 1;
 const Z_PIXMAP: c_int = 2;
@@ -23,6 +23,7 @@ const MAX_X11_SHM_BYTES: usize = 256 * 1024 * 1024;
 
 // Event masks
 const KEY_PRESS_MASK: c_long = 1 << 0;
+const KEY_RELEASE_MASK: c_long = 1 << 1;
 const BUTTON_PRESS_MASK: c_long = 1 << 2;
 const BUTTON_RELEASE_MASK: c_long = 1 << 3;
 const POINTER_MOTION_MASK: c_long = 1 << 6;
@@ -31,6 +32,7 @@ const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
 
 // Event types
 const KEY_PRESS: c_int = 2;
+const KEY_RELEASE: c_int = 3;
 const BUTTON_PRESS: c_int = 4;
 const BUTTON_RELEASE: c_int = 5;
 const MOTION_NOTIFY: c_int = 6;
@@ -370,6 +372,11 @@ struct X11Api {
         *mut KeySym,
         *mut c_void,
     ) -> c_int,
+    XSendEvent: unsafe extern "C" fn(*mut Display, Window, c_int, c_long, *mut XEvent) -> c_int,
+    XMoveResizeWindow:
+        unsafe extern "C" fn(*mut Display, Window, c_int, c_int, c_uint, c_uint) -> c_int,
+    XMapRaised: unsafe extern "C" fn(*mut Display, Window) -> c_int,
+    XUnmapWindow: unsafe extern "C" fn(*mut Display, Window) -> c_int,
 }
 
 impl Drop for X11Api {
@@ -436,6 +443,10 @@ impl X11Api {
                 XSync: load_sym(handle, c"XSync")?,
                 XSetErrorHandler: load_sym(handle, c"XSetErrorHandler")?,
                 XLookupString: load_sym(handle, c"XLookupString")?,
+                XSendEvent: load_sym(handle, c"XSendEvent")?,
+                XMoveResizeWindow: load_sym(handle, c"XMoveResizeWindow")?,
+                XMapRaised: load_sym(handle, c"XMapRaised")?,
+                XUnmapWindow: load_sym(handle, c"XUnmapWindow")?,
             })
         };
         if res.is_err() {
@@ -831,6 +842,182 @@ fn present_canvas_rect(
     }
 }
 
+/// Process-wide X error handler. Xlib's default handler exits the process; with foreign
+/// (embedded) windows that may vanish at any moment, a `BadWindow` must not kill the browser.
+unsafe extern "C" fn lenient_error_handler(_display: *mut Display, err: *mut XErrorEvent) -> c_int {
+    if !err.is_null() {
+        eprintln!(
+            "droplet: ignored X error {} (request {}) on resource {:#x}",
+            (*err).error_code,
+            (*err).request_code,
+            (*err).resourceid
+        );
+    }
+    0
+}
+
+// XEmbed protocol messages (freedesktop XEmbed spec 0.5).
+const XEMBED_EMBEDDED_NOTIFY: c_long = 0;
+const XEMBED_WINDOW_ACTIVATE: c_long = 1;
+const XEMBED_FOCUS_IN: c_long = 4;
+const XEMBED_FOCUS_CURRENT: c_long = 0;
+const XEMBED_VERSION: c_long = 0;
+
+/// What the backend must do to go from the shown foreign view to the wanted one.
+#[derive(Debug, PartialEq, Eq)]
+struct EmbedActions {
+    unmap: Option<u64>,
+    place: Option<EmbeddedView>,
+    /// A newly shown view gets the XEmbed handshake + focus.
+    activate: bool,
+}
+
+fn embed_actions(shown: Option<EmbeddedView>, wanted: Option<EmbeddedView>) -> EmbedActions {
+    match (shown, wanted) {
+        (Some(a), Some(b)) if a.handle == b.handle => EmbedActions {
+            unmap: None,
+            place: (a != b).then_some(b),
+            activate: false,
+        },
+        (shown, wanted) => EmbedActions {
+            unmap: shown.map(|v| v.handle),
+            place: wanted,
+            activate: wanted.is_some(),
+        },
+    }
+}
+
+fn send_xembed(
+    x11: &X11Api,
+    display: *mut Display,
+    target: Window,
+    xembed: Atom,
+    msg: [c_long; 4],
+) {
+    let mut event = XEvent { pad: [0; 24] };
+    event.xclient = XClientMessageEvent {
+        type_: CLIENT_MESSAGE,
+        serial: 0,
+        send_event: 1,
+        display,
+        window: target,
+        message_type: xembed,
+        format: 32,
+        data_l: [0, msg[0], msg[1], msg[2], msg[3]],
+    };
+    unsafe { (x11.XSendEvent)(display, target, 0, 0, &mut event) };
+}
+
+fn sync_embedded(
+    x11: &X11Api,
+    display: *mut Display,
+    parent: Window,
+    xembed: Atom,
+    shown: &mut Option<EmbeddedView>,
+    wanted: Option<EmbeddedView>,
+) {
+    let actions = embed_actions(*shown, wanted);
+    if actions.unmap.is_none() && actions.place.is_none() {
+        return;
+    }
+    unsafe {
+        if let Some(old) = actions.unmap {
+            (x11.XUnmapWindow)(display, old as Window);
+        }
+        if let Some(v) = actions.place {
+            let win = v.handle as Window;
+            (x11.XMoveResizeWindow)(display, win, v.x, v.y, v.width.max(1), v.height.max(1));
+            if actions.activate {
+                (x11.XMapRaised)(display, win);
+                if xembed != 0 {
+                    let p = parent as c_long;
+                    send_xembed(
+                        x11,
+                        display,
+                        win,
+                        xembed,
+                        [XEMBED_EMBEDDED_NOTIFY, 0, p, XEMBED_VERSION],
+                    );
+                    send_xembed(x11, display, win, xembed, [XEMBED_WINDOW_ACTIVATE, 0, 0, 0]);
+                    send_xembed(
+                        x11,
+                        display,
+                        win,
+                        xembed,
+                        [XEMBED_FOCUS_IN, XEMBED_FOCUS_CURRENT, 0, 0],
+                    );
+                }
+            }
+        }
+        (x11.XFlush)(display);
+    }
+    *shown = wanted;
+}
+
+/// Browser shortcuts that Droplet keeps while an embedded web view has the keyboard;
+/// every other key goes to the view.
+fn is_shell_shortcut(keysym: KeySym, ctrl: bool, alt: bool, shift: bool) -> bool {
+    let lower = |k: KeySym| {
+        if (0x41..=0x5a).contains(&k) {
+            k + 0x20
+        } else {
+            k
+        }
+    };
+    let k = lower(keysym);
+    if ctrl && !alt {
+        return matches!(
+            k,
+            0x6c /* l */ | 0x74 /* t */ | 0x77 /* w */ | 0x72 /* r */ | 0x64 /* d */
+        ) || (shift && k == 0x69/* Ctrl+Shift+I */)
+            || (XK_DIGIT_1..=XK_DIGIT_9).contains(&keysym)
+            || (XK_KP_1..=XK_KP_9).contains(&keysym)
+            || keysym == XK_TAB
+            || keysym == XK_ISO_LEFT_TAB;
+    }
+    if alt && !ctrl {
+        return matches!(keysym, XK_LEFT | XK_RIGHT | XK_HOME);
+    }
+    keysym == XK_F5
+}
+
+/// Re-sends a key event to the embedded view (XEmbed: the embedder keeps the X focus and
+/// forwards keys). Returns `false` when the key is a browser shortcut and must be handled here.
+fn forward_key(x11: &X11Api, display: *mut Display, view: Window, event: &XEvent) -> bool {
+    let mut key_ev = unsafe { event.xkey };
+    let mut keysym: KeySym = 0;
+    let mut buf = [0u8; 8];
+    unsafe {
+        (x11.XLookupString)(
+            &mut key_ev,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as c_int,
+            &mut keysym,
+            ptr::null_mut(),
+        )
+    };
+    let ctrl = key_ev.state & CONTROL_MASK != 0;
+    let alt = key_ev.state & MOD1_MASK != 0;
+    let shift = key_ev.state & SHIFT_MASK != 0;
+    if is_shell_shortcut(keysym, ctrl, alt, shift) {
+        return false;
+    }
+    let mut fwd = XEvent { pad: [0; 24] };
+    key_ev.window = view;
+    key_ev.subwindow = 0;
+    fwd.xkey = key_ev;
+    let mask = if unsafe { event.type_ } == KEY_PRESS {
+        KEY_PRESS_MASK
+    } else {
+        KEY_RELEASE_MASK
+    };
+    unsafe {
+        (x11.XSendEvent)(display, view, 0, mask, &mut fwd);
+        (x11.XFlush)(display);
+    }
+    true
+}
+
 fn handle_key_event<A: PlatformApp>(x11: &X11Api, app: &mut A, key_ev: &mut XKeyEvent) {
     let mut buf = [0u8; 32];
     let mut keysym: KeySym = 0;
@@ -995,6 +1182,7 @@ pub(crate) fn run<A: PlatformApp>(app: &mut A) -> Result<(), String> {
         x11: &x11,
         display,
     };
+    unsafe { (x11.XSetErrorHandler)(Some(lenient_error_handler)) };
 
     let screen = unsafe { (x11.XDefaultScreen)(display) };
     let depth = unsafe { (x11.XDefaultDepth)(display, screen) };
@@ -1035,6 +1223,7 @@ pub(crate) fn run<A: PlatformApp>(app: &mut A) -> Result<(), String> {
             window,
             EXPOSURE_MASK
                 | KEY_PRESS_MASK
+                | KEY_RELEASE_MASK
                 | BUTTON_PRESS_MASK
                 | BUTTON_RELEASE_MASK
                 | POINTER_MOTION_MASK
@@ -1090,6 +1279,11 @@ pub(crate) fn run<A: PlatformApp>(app: &mut A) -> Result<(), String> {
 
     // Background work (page loads) wakes the loop through this self-pipe (DROP-110).
     // Installed before the first frame so a deferred start page loads in the background.
+    // Foreign web views (DROP-170) are XEmbed clients of this window.
+    app.set_embed_parent(window as u64);
+    let xembed_atom = unsafe { (x11.XInternAtom)(display, c"_XEMBED".as_ptr(), 0) };
+    let mut shown_embed: Option<EmbeddedView> = None;
+
     let wake = WakePipe::new().ok();
     if let Some(ref pipe) = wake {
         app.set_waker(pipe.waker());
@@ -1200,8 +1394,23 @@ pub(crate) fn run<A: PlatformApp>(app: &mut A) -> Result<(), String> {
                         if let Some((w, h)) = pending_resize.take() {
                             app.resize(w, h);
                         }
-                        let mut key_ev = event.xkey;
-                        handle_key_event(&x11, app, &mut key_ev);
+                        let forwarded = match shown_embed {
+                            Some(view) if !app.wants_text_input() => {
+                                forward_key(&x11, display, view.handle as Window, &event)
+                            }
+                            _ => false,
+                        };
+                        if !forwarded {
+                            let mut key_ev = event.xkey;
+                            handle_key_event(&x11, app, &mut key_ev);
+                        }
+                    }
+                    KEY_RELEASE => {
+                        if let Some(view) = shown_embed {
+                            if !app.wants_text_input() {
+                                forward_key(&x11, display, view.handle as Window, &event);
+                            }
+                        }
                     }
                     CLIENT_MESSAGE
                         if wm_delete != 0 && (event.xclient.data_l[0] as Atom) == wm_delete =>
@@ -1230,6 +1439,15 @@ pub(crate) fn run<A: PlatformApp>(app: &mut A) -> Result<(), String> {
         if let Some((mx, my)) = pending_motion {
             app.handle_mouse_move(mx, my);
         }
+
+        sync_embedded(
+            &x11,
+            display,
+            window,
+            xembed_atom,
+            &mut shown_embed,
+            app.embedded_view(),
+        );
 
         let current_title = app.active_title();
         if current_title != last_title {
@@ -1314,6 +1532,81 @@ pub(crate) fn run<A: PlatformApp>(app: &mut A) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    fn view(handle: u64, width: u32) -> EmbeddedView {
+        EmbeddedView {
+            handle,
+            x: 0,
+            y: 74,
+            width,
+            height: 500,
+        }
+    }
+
+    #[test]
+    fn embed_actions_show_move_switch_hide() {
+        let none = EmbedActions {
+            unmap: None,
+            place: None,
+            activate: false,
+        };
+        assert_eq!(embed_actions(None, None), none);
+        assert_eq!(
+            embed_actions(None, Some(view(7, 800))),
+            EmbedActions {
+                unmap: None,
+                place: Some(view(7, 800)),
+                activate: true
+            }
+        );
+        assert_eq!(embed_actions(Some(view(7, 800)), Some(view(7, 800))), none);
+        // Window resize: move only, no second XEmbed handshake.
+        assert_eq!(
+            embed_actions(Some(view(7, 800)), Some(view(7, 900))),
+            EmbedActions {
+                unmap: None,
+                place: Some(view(7, 900)),
+                activate: false
+            }
+        );
+        // Tab switch to another web view.
+        assert_eq!(
+            embed_actions(Some(view(7, 800)), Some(view(9, 800))),
+            EmbedActions {
+                unmap: Some(7),
+                place: Some(view(9, 800)),
+                activate: true
+            }
+        );
+        // Tab switch to a Droplet-rendered page.
+        assert_eq!(
+            embed_actions(Some(view(7, 800)), None),
+            EmbedActions {
+                unmap: Some(7),
+                place: None,
+                activate: false
+            }
+        );
+    }
+
+    #[test]
+    fn shell_shortcuts_stay_with_droplet() {
+        assert!(is_shell_shortcut(0x6c, true, false, false)); // Ctrl+L
+        assert!(is_shell_shortcut(0x4c, true, false, true)); // Ctrl+Shift+L (uppercase keysym)
+        assert!(is_shell_shortcut(0x74, true, false, false)); // Ctrl+T
+        assert!(is_shell_shortcut(XK_DIGIT_1 + 2, true, false, false)); // Ctrl+3
+        assert!(is_shell_shortcut(XK_TAB, true, false, false)); // Ctrl+Tab
+        assert!(is_shell_shortcut(XK_LEFT, false, true, false)); // Alt+Left
+        assert!(is_shell_shortcut(XK_F5, false, false, false));
+        // Page keys go to the web view: copy/paste, typing, Cyrillic, arrows, Escape.
+        assert!(!is_shell_shortcut(0x63, true, false, false)); // Ctrl+C
+        assert!(!is_shell_shortcut(0x76, true, false, false)); // Ctrl+V
+        assert!(!is_shell_shortcut(0x61, false, false, false)); // a
+        assert!(!is_shell_shortcut(0x6d4, false, false, false)); // Cyrillic_ze
+        assert!(!is_shell_shortcut(XK_LEFT, false, false, false));
+        assert!(!is_shell_shortcut(XK_ESCAPE, false, false, false));
+        assert!(!is_shell_shortcut(0x69, true, false, false)); // Ctrl+I without Shift
+    }
     use super::*;
 
     #[test]
