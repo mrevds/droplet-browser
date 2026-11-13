@@ -7,10 +7,10 @@ mod imp {
     use std::os::unix::io::AsRawFd;
     use std::ptr;
     use std::sync::OnceLock;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use crate::dns::strip_ipv6_brackets;
-    use crate::{NetError, HTTP_TIMEOUT};
+    use crate::{NetError, HANDSHAKE_TIMEOUT, READ_TIMEOUT};
 
     const RTLD_LAZY: c_int = 1;
     const SSL_VERIFY_PEER: c_int = 1;
@@ -190,6 +190,18 @@ mod imp {
         }
 
         pub fn connect(tcp: TcpStream, host: &str) -> Result<Self, NetError> {
+            Self::connect_within(tcp, host, HANDSHAKE_TIMEOUT)
+        }
+
+        /// TLS handshake bounded by one total `budget`. The socket is blocking, so OpenSSL
+        /// reports `WANT_READ`/`WANT_WRITE` only when a single socket wait timed out (or was
+        /// interrupted); that is not a failure while budget remains (DROP-111). Before every
+        /// attempt the socket timeouts are shrunk to the remaining budget, and restored after.
+        pub(crate) fn connect_within(
+            tcp: TcpStream,
+            host: &str,
+            budget: Duration,
+        ) -> Result<Self, NetError> {
             let rt = runtime()?;
             let clean_host = strip_ipv6_brackets(host);
             let c_host = CString::new(clean_host).map_err(|_| NetError {
@@ -233,8 +245,25 @@ mod imp {
                 });
             }
 
-            let deadline = Instant::now() + HTTP_TIMEOUT;
+            let start = Instant::now();
+            let deadline = start + budget;
+            let idle_read = stream._tcp.read_timeout().ok().flatten();
+            let idle_write = stream._tcp.write_timeout().ok().flatten();
             loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(NetError {
+                        message: format!(
+                            "TLS handshake with '{host}' timed out after {:.1} s",
+                            start.elapsed().as_secs_f64()
+                        ),
+                    });
+                }
+                // Zero would mean "block forever" to the OS; keep a 1 ms floor.
+                let slice = remaining.max(Duration::from_millis(1));
+                let _ = stream._tcp.set_read_timeout(Some(slice));
+                let _ = stream._tcp.set_write_timeout(Some(slice));
+
                 let ret = unsafe { (rt.SSL_connect)(stream.ssl) };
                 if ret == 1 {
                     break;
@@ -242,22 +271,8 @@ mod imp {
 
                 let ssl_err = unsafe { (rt.SSL_get_error)(stream.ssl, ret) };
                 if ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE {
-                    let os_err = std::io::Error::last_os_error();
-                    if matches!(os_err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
-                        || Instant::now() >= deadline
-                    {
-                        return Err(NetError {
-                            message: format!("TLS handshake timed out for '{host}'"),
-                        });
-                    }
-                    if os_err.kind() == ErrorKind::Interrupted
-                        || os_err.raw_os_error().unwrap_or(0) == 0
-                    {
-                        continue;
-                    }
-                    return Err(NetError {
-                        message: format!("TLS handshake I/O error for '{host}': {os_err}"),
-                    });
+                    // A socket wait expired or was interrupted: retry until the deadline.
+                    continue;
                 }
 
                 let verify_res = unsafe { (rt.SSL_get_verify_result)(stream.ssl) };
@@ -269,10 +284,22 @@ mod imp {
                     });
                 }
 
+                let detail = if ssl_err == SSL_ERROR_SYSCALL {
+                    let os_err = std::io::Error::last_os_error();
+                    if os_err.raw_os_error().unwrap_or(0) == 0 {
+                        "peer closed the connection".to_string()
+                    } else {
+                        os_err.to_string()
+                    }
+                } else {
+                    format!("SSL error {ssl_err}")
+                };
                 return Err(NetError {
-                    message: format!("TLS handshake failed for '{host}' (SSL error {ssl_err})"),
+                    message: format!("TLS handshake with '{host}' failed: {detail}"),
                 });
             }
+            let _ = stream._tcp.set_read_timeout(idle_read);
+            let _ = stream._tcp.set_write_timeout(idle_write);
 
             let verify_res = unsafe { (rt.SSL_get_verify_result)(stream.ssl) };
             if verify_res != X509_V_OK {
@@ -294,7 +321,7 @@ mod imp {
             }
             let rt = runtime().map_err(|e| std::io::Error::other(e.message))?;
             let max_len = buf.len().min(c_int::MAX as usize) as c_int;
-            let deadline = Instant::now() + HTTP_TIMEOUT;
+            let deadline = Instant::now() + READ_TIMEOUT;
 
             loop {
                 let ret =
@@ -313,7 +340,7 @@ mod imp {
                         {
                             return Err(std::io::Error::new(
                                 ErrorKind::TimedOut,
-                                "TLS read timed out",
+                                "TLS read timed out (no data)",
                             ));
                         }
                         if os_err.kind() == ErrorKind::Interrupted
@@ -347,7 +374,7 @@ mod imp {
             }
             let rt = runtime().map_err(|e| std::io::Error::other(e.message))?;
             let max_len = buf.len().min(c_int::MAX as usize) as c_int;
-            let deadline = Instant::now() + HTTP_TIMEOUT;
+            let deadline = Instant::now() + READ_TIMEOUT;
 
             loop {
                 let ret =
@@ -402,6 +429,81 @@ mod imp {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::net::TcpListener;
+
+        /// Server that accepts one connection, waits `delay`, optionally writes `reply`, then
+        /// holds the socket open until the client goes away.
+        fn stalling_server(
+            delay: Duration,
+            reply: Option<&'static [u8]>,
+        ) -> (TcpStream, std::thread::JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = std::thread::spawn(move || {
+                let (mut sock, _) = listener.accept().unwrap();
+                std::thread::sleep(delay);
+                if let Some(bytes) = reply {
+                    let _ = sock.write_all(bytes);
+                }
+                let mut sink = [0u8; 4096];
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                while matches!(sock.read(&mut sink), Ok(n) if n > 0) {}
+            });
+            (TcpStream::connect(addr).unwrap(), handle)
+        }
+
+        fn openssl_available() -> bool {
+            runtime().is_ok()
+        }
+
+        #[test]
+        fn silent_server_hits_the_total_handshake_budget() {
+            if !openssl_available() {
+                return;
+            }
+            let (tcp, server) = stalling_server(Duration::from_millis(1200), None);
+            // The socket's idle timeout (3 s) is longer than the handshake budget (600 ms):
+            // the handshake must shrink socket waits to the remaining budget, not overshoot.
+            tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let start = Instant::now();
+            let err = match TlsStream::connect_within(tcp, "example.test", Duration::from_millis(600)) {
+                Err(err) => err,
+                Ok(_) => panic!("silent server cannot complete a handshake"),
+            };
+            let took = start.elapsed();
+            assert!(err.message.contains("handshake") && err.message.contains("timed out"), "{}", err.message);
+            assert!(took >= Duration::from_millis(550), "gave up early: {took:?}");
+            assert!(took < Duration::from_millis(1400), "overshot budget: {took:?}");
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn stall_longer_than_one_socket_wait_is_not_a_timeout() {
+            if !openssl_available() {
+                return;
+            }
+            // The peer answers after 500 ms with bytes that are not TLS. The old loop treated the
+            // first 100 ms socket timeout as "handshake timed out"; now we must keep waiting,
+            // receive the bytes, and fail for the real reason instead.
+            let (tcp, server) =
+                stalling_server(Duration::from_millis(500), Some(b"HTTP/1.1 400 Bad Request\r\n\r\n"));
+            tcp.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+            let start = Instant::now();
+            let err = match TlsStream::connect_within(tcp, "example.test", Duration::from_secs(5)) {
+                Err(err) => err,
+                Ok(_) => panic!("plain-text peer cannot complete a handshake"),
+            };
+            let took = start.elapsed();
+            assert!(took >= Duration::from_millis(450), "gave up before the peer spoke: {took:?}");
+            assert!(!err.message.contains("timed out"), "{}", err.message);
+            assert!(err.message.contains("TLS handshake with 'example.test' failed"), "{}", err.message);
+            server.join().unwrap();
         }
     }
 }

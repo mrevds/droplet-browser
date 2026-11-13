@@ -14,10 +14,10 @@ use std::net::TcpStream;
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::dns::strip_ipv6_brackets;
-use crate::{NetError, HTTP_TIMEOUT};
+use crate::{NetError, HANDSHAKE_TIMEOUT, READ_TIMEOUT};
 
 type SecStatus = i32;
 
@@ -336,10 +336,16 @@ fn read_exact_deadline(
             Ok(n) => offset += n,
             Err(err) if err.kind() == ErrorKind::Interrupted => continue,
             Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                return Err(std::io::Error::new(
-                    ErrorKind::TimedOut,
-                    "timed out reading TLS handshake data",
-                ));
+                // One socket wait expired; keep waiting while the total budget lasts (DROP-111).
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(std::io::Error::new(
+                        ErrorKind::TimedOut,
+                        "timed out reading TLS handshake data",
+                    ));
+                }
+                let _ = tcp.set_read_timeout(Some(remaining.max(Duration::from_millis(1))));
+                continue;
             }
             Err(err) => return Err(err),
         }
@@ -431,7 +437,10 @@ impl TlsStream {
         };
 
         stream.acquire_credentials()?;
-        let leftover = stream.handshake(&target)?;
+        let idle_read = stream.tcp.read_timeout().ok().flatten();
+        let leftover = stream.handshake(&target);
+        let _ = stream.tcp.set_read_timeout(idle_read);
+        let leftover = leftover?;
         stream.pending = leftover;
         stream.query_stream_sizes()?;
         stream.verify_peer(clean_host)?;
@@ -483,7 +492,7 @@ impl TlsStream {
     }
 
     fn handshake(&mut self, target: &[u16]) -> Result<Vec<u8>, NetError> {
-        let deadline = Instant::now() + HTTP_TIMEOUT;
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
         let mut input = Vec::new();
         let mut first_call = true;
 
@@ -848,7 +857,7 @@ impl Read for TlsStream {
             return Ok(0);
         }
 
-        let deadline = Instant::now() + HTTP_TIMEOUT;
+        let deadline = Instant::now() + READ_TIMEOUT;
         loop {
             if let Some(plain) = self.decrypt_pending()? {
                 if !plain.is_empty() {

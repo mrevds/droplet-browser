@@ -18,7 +18,14 @@ use adblock::TrackerFilter;
 
 pub use pool::{decode_chunked, parse_http_response};
 
-pub(crate) const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Total budget for TCP connect across all resolved addresses (DROP-111). Lossy links need
+/// SYN retransmits at 1 s and 3 s, so a few seconds is not enough.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Total budget for the TLS handshake. A single lost server flight costs 1 + 2 + 4 s of
+/// retransmission backoff, so this must exceed any one socket wait.
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest silence tolerated while waiting for response bytes (first byte and between reads).
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_REDIRECTS: usize = 5;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_HEADER_BYTES: usize = 64 * 1024;

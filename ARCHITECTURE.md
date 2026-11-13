@@ -82,7 +82,7 @@ The orchestration layer (`crates/droplet-shell/src/` -> `Browser`) manages multi
   - On **Linux**, `tls::TlsStream` dynamically loads `libssl.so.4`, `libssl.so.3`, or `libssl.so` at runtime via `dlopen`, configures system CA verification (`SSL_CTX_set_default_verify_paths` + `SSL_VERIFY_PEER`), sets SNI (`SSL_set_tlsext_host_name`), and verifies the peer hostname (`SSL_set1_host` + `SSL_get_verify_result`).
   - On **Windows**, `tls_schannel::TlsStream` uses native Win32 **Schannel** (`secur32.dll` / `crypt32.dll`: `AcquireCredentialsHandleW`, `InitializeSecurityContextW`, `QueryContextAttributesW`, `EncryptMessage` / `DecryptMessage`, `FreeCredentialsHandle`) with system certificate trust and SNI—without OpenSSL.
   - On unsupported targets, `tls::TlsStream::connect` returns a descriptive `NetError`.
-- **Concurrency & Limits:** `fetch_many` uses a bounded `std::thread::scope` pool (`MAX_CONCURRENT_FETCHES = 4`); enforces `HTTP_TIMEOUT = 5s`, `MAX_REDIRECTS = 5`, `MAX_HEADER_BYTES = 64 KiB`, and `MAX_RESPONSE_BYTES = 16 MiB`.
+- **Concurrency & Limits:** `fetch_many` uses a bounded `std::thread::scope` pool (`MAX_CONCURRENT_FETCHES = 4`); enforces `CONNECT_TIMEOUT = 10 s` (all resolved addresses), `HANDSHAKE_TIMEOUT = 15 s` (total, retried across socket waits — DROP-111), `READ_TIMEOUT = 15 s` idle, `MAX_REDIRECTS = 5`, `MAX_HEADER_BYTES = 64 KiB`, and `MAX_RESPONSE_BYTES = 16 MiB`.
 - **Built-in & User Pages (`about.rs`, `user_pages.rs`):** `about:droplet`, `about:roadmap`, `about:architecture`, `about:test`, `about:blank`, plus dynamic HTML views for `about:history` and `about:bookmarks`.
 
 ### 4. Pure-Rust Image Decoder (`crates/droplet-image/src/`)

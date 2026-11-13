@@ -8,7 +8,7 @@ use droplet_url::{Scheme, Url};
 
 use crate::dns::{cache_dns_entry, invalidate_dns_entry, resolve_addrs, resolve_addrs_uncached};
 use crate::tls::TlsStream;
-use crate::{NetError, HTTP_TIMEOUT, MAX_HEADER_BYTES, MAX_RESPONSE_BYTES};
+use crate::{NetError, CONNECT_TIMEOUT, MAX_HEADER_BYTES, MAX_RESPONSE_BYTES, READ_TIMEOUT};
 
 const POOL_IDLE_TTL: Duration = Duration::from_secs(30);
 const POOL_MAX_PER_ORIGIN: usize = 4;
@@ -130,33 +130,44 @@ impl Write for TransportStream {
     }
 }
 
-fn connect_tcp_addrs(addrs: &[SocketAddr]) -> Result<TcpStream, std::io::Error> {
+/// Tries every address in order within one shared `budget`. Each attempt gets an equal
+/// share of what is left (so an unreachable first address cannot eat the whole budget),
+/// but never less than `MIN_ATTEMPT` unless the budget itself is smaller.
+fn connect_tcp_addrs(addrs: &[SocketAddr], budget: Duration) -> Result<TcpStream, std::io::Error> {
+    const MIN_ATTEMPT: Duration = Duration::from_millis(1500);
+    let deadline = Instant::now() + budget;
     let mut last_err = None;
-    for addr in addrs {
-        match TcpStream::connect_timeout(addr, HTTP_TIMEOUT) {
+    for (i, addr) in addrs.iter().enumerate() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let left = (addrs.len() - i) as u32;
+        let attempt = (remaining / left).max(MIN_ATTEMPT.min(remaining));
+        match TcpStream::connect_timeout(addr, attempt) {
             Ok(stream) => return Ok(stream),
             Err(err) => last_err = Some(err),
         }
     }
-    Err(last_err.unwrap_or_else(|| std::io::Error::new(ErrorKind::NotFound, "no addresses")))
+    Err(last_err.unwrap_or_else(|| std::io::Error::new(ErrorKind::TimedOut, "connect timed out")))
 }
 
 fn connect_stream(url: &Url) -> Result<TransportStream, NetError> {
     let (addrs, from_cache) = resolve_addrs(&url.host, url.port)?;
-    let tcp = match connect_tcp_addrs(&addrs) {
+    let tcp = match connect_tcp_addrs(&addrs, CONNECT_TIMEOUT) {
         Ok(stream) => stream,
         Err(first_err) => {
             if from_cache {
                 invalidate_dns_entry(&url.host, url.port);
                 let fresh_addrs = resolve_addrs_uncached(&url.host, url.port)?;
                 cache_dns_entry((url.host.clone(), url.port), fresh_addrs.clone());
-                connect_tcp_addrs(&fresh_addrs).map_err(|err| NetError {
-                    message: format!("Failed to connect to '{}:{}': {err}", url.host, url.port),
+                connect_tcp_addrs(&fresh_addrs, CONNECT_TIMEOUT).map_err(|err| NetError {
+                    message: format!("connect to '{}:{}' failed: {err}", url.host, url.port),
                 })?
             } else {
                 return Err(NetError {
                     message: format!(
-                        "Failed to connect to '{}:{}': {first_err}",
+                        "connect to '{}:{}' failed: {first_err}",
                         url.host, url.port
                     ),
                 });
@@ -164,8 +175,9 @@ fn connect_stream(url: &Url) -> Result<TransportStream, NetError> {
         }
     };
 
-    let _ = tcp.set_read_timeout(Some(HTTP_TIMEOUT));
-    let _ = tcp.set_write_timeout(Some(HTTP_TIMEOUT));
+    // Idle limits for the HTTP exchange; the TLS handshake manages its own deadline.
+    let _ = tcp.set_read_timeout(Some(READ_TIMEOUT));
+    let _ = tcp.set_write_timeout(Some(READ_TIMEOUT));
     let _ = tcp.set_nodelay(true);
 
     match url.scheme {
@@ -824,4 +836,44 @@ fn find_line_end(slice: &[u8]) -> Option<(usize, usize)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn connect_falls_through_refused_address_to_working_one() {
+        // A port that was bound and released: connecting to it is refused immediately.
+        let refused = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let live = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live_addr = live.local_addr().unwrap();
+        let start = Instant::now();
+        let stream = connect_tcp_addrs(&[refused, live_addr], Duration::from_secs(5))
+            .expect("second address accepts");
+        assert_eq!(stream.peer_addr().unwrap(), live_addr);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn connect_reports_last_error_when_every_address_fails() {
+        let a = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let b = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let err = connect_tcp_addrs(&[a, b], Duration::from_secs(2)).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
+        let err = connect_tcp_addrs(&[], Duration::from_secs(1)).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn connect_error_message_names_the_phase() {
+        let refused = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let url = Url::parse(&format!("http://127.0.0.1:{}/путь", refused.port())).unwrap();
+        let err = match connect_stream(&url) {
+            Err(err) => err,
+            Ok(_) => panic!("refused port must not connect"),
+        };
+        assert!(err.message.starts_with("connect to '127.0.0.1:"), "{}", err.message);
+    }
 }

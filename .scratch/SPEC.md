@@ -28,7 +28,7 @@ Status values: `done`, `ready`, `blocked`, `frozen` (do not touch until its phas
 | --- | --- | --- | --- | --- | --- | --- |
 | `DROP-100` | P0 | Hygiene & measurement: remove `src/`, JS off by default, `sandbox` feature, unified `--dump-layout`, `--bench`, corpus goldens | `done` | — | all (baseline) | this file |
 | `DROP-110` | P1 | Navigation off the UI thread: worker + channel, cancel, progressive status | `done` | — | HN, Wikipedia (GUI responsiveness) | [spec](issues/DROP-110-async-navigation.md) |
-| `DROP-111` | P1 | Reliable TLS handshake & timeouts (poll-based, separate connect/handshake/read deadlines) | `ready` | — | HN | [spec](issues/DROP-111-tls-timeouts.md) |
+| `DROP-111` | P1 | Reliable TLS handshake & timeouts (poll-based, separate connect/handshake/read deadlines) | `done` | — | HN | [spec](issues/DROP-111-tls-timeouts.md) |
 | `DROP-112` | P1 | `Content-Encoding: gzip/deflate` (reuse PNG inflate) | `ready` | — | Wikipedia | [spec](issues/DROP-112-gzip.md) |
 | `DROP-113` | P1 | Cookies (RFC 6265 subset, bounded jar, `Secure`/`HttpOnly`/`Path`/`Expires`) | `ready` | — | login flows | [spec](issues/DROP-113-cookies.md) |
 | `DROP-120` | P2 | Selector rule index (buckets by id/class/tag, right-to-left match) | `done` | — | Wikipedia style `261 ms → < 20 ms` | [spec](issues/DROP-120-rule-index.md) |
