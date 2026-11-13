@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<!-- EXPECT (viewport 1024px): "wide layout" is visible, "narrow layout" is hidden, the body background is NOT red (print rule ignored). -->
+<html><head><meta charset="utf-8"><title>Media</title>
+<style>
+.wide { display: none } .narrow { display: block }
+@media (min-width: 800px) { .wide { display: block } .narrow { display: none } }
+@media print { body { background: red } }
+</style></head><body>
+<div class="wide">wide layout</div>
+<div class="narrow">narrow layout</div>
+</body></html>

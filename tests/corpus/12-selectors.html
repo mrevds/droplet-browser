@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<!-- EXPECT: items 1 and 3 have a grey background (:nth-child(odd)); the first item is bold (:first-child); the [data-x] item is underlined; every li except .skip has a left border (:not). -->
+<html><head><meta charset="utf-8"><title>Selectors</title>
+<style>
+li:nth-child(odd) { background: #eee } li:first-child { font-weight: bold }
+[data-x] { text-decoration: underline } li:not(.skip) { border-left: 3px solid #000 }
+</style></head><body>
+<ul><li>один</li><li data-x="1">two</li><li>три</li><li class="skip">skip</li></ul>
+</body></html>

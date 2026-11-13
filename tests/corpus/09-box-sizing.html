@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<!-- EXPECT: .bb is exactly as wide as its 600px parent (border-box includes padding); .cb overflows by 40px (content-box); .center is 300px wide and horizontally centered; .max is capped at 200px. (rust-lang.org "Get Started" overflow is this bug.) -->
+<html><head><meta charset="utf-8"><title>Box sizing</title>
+<style>
+.p { width: 600px; border: 1px solid #000 }
+.bb { box-sizing: border-box; width: 100%; padding: 20px; background: #fc3 }
+.cb { width: 100%; padding: 20px; background: #3cf }
+.center { width: 300px; margin: 0 auto; background: #ccc }
+.max { max-width: 200px; background: #9c9 }
+</style></head><body>
+<div class="p"><div class="bb">border-box</div><div class="cb">content-box</div><div class="center">центр</div><div class="max">max-width 200px</div></div>
+</body></html>

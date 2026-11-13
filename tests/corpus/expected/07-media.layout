@@ -1,0 +1,9 @@
+Block (0.0, 0.0, 1024.0 x 52.0)
+  AnonymousBlock (0.0, 0.0, 1024.0 x 0.0)
+  Block (0.0, 0.0, 1024.0 x 52.0)
+    Block (16.0, 16.0, 992.0 x 20.0)
+      AnonymousBlock (16.0, 16.0, 992.0 x 0.0)
+      Block (16.0, 16.0, 992.0 x 20.0)
+        Text (16.0, 16.0, 104.0 x 20.0) "narrow layout"
+      AnonymousBlock (16.0, 36.0, 992.0 x 0.0)
+  AnonymousBlock (0.0, 52.0, 1024.0 x 0.0)

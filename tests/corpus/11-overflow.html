@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<!-- EXPECT: the 100x40 box clips its long text (overflow: hidden); the display:none div produces no box; visibility:hidden keeps its space but draws nothing. -->
+<html><head><meta charset="utf-8"><title>Overflow</title>
+<style>.clip { width: 100px; height: 40px; overflow: hidden; border: 1px solid #000 } .gone { display: none } .ghost { visibility: hidden; height: 30px }</style>
+</head><body>
+<div class="clip">Очень длинный текст который не помещается в маленький блок и должен обрезаться</div>
+<div class="gone">invisible</div>
+<div class="ghost">ghost</div>
+<p>end</p>
+</body></html>

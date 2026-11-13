@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<!-- EXPECT: #a is green (!important beats the id rule), #b inherits blue from its parent, #c is 20px tall from var(--h), #d is green (later rule at equal specificity wins). -->
+<html><head><meta charset="utf-8"><title>Cascade</title>
+<style>
+:root { --h: 20px }
+p { color: green !important } #a { color: red }
+.parent { color: blue } #b { color: inherit }
+#c { height: var(--h); background: #ddd }
+.d { color: red } .d { color: green }
+</style></head><body>
+<p id="a">important wins</p>
+<div class="parent"><span id="b">наследует синий</span></div>
+<div id="c"></div>
+<div class="d" id="d">later wins</div>
+</body></html>

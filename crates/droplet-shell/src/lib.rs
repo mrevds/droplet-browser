@@ -1,3 +1,4 @@
+pub mod bench;
 mod bookmarks;
 pub mod find;
 pub mod forms;
@@ -59,6 +60,32 @@ enum PressedTarget {
     },
 }
 
+static JS_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Sets the process-wide default for [`BrowserOptions::js`] (the `--js` CLI flag).
+///
+/// JavaScript is off by default: the ES-subset VM cannot run real-world scripts yet
+/// (see ROADMAP Phase 7), and skipping scripts saves network round-trips and memory.
+pub fn set_js_default(enabled: bool) {
+    JS_DEFAULT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Per-browser feature switches fixed at construction time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BrowserOptions {
+    /// Collect, fetch and execute `<script>` elements.
+    pub js: bool,
+}
+
+impl BrowserOptions {
+    /// Options derived from process-wide defaults (see [`set_js_default`]).
+    pub fn from_defaults() -> Self {
+        Self {
+            js: JS_DEFAULT.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
 /// Top-level browser shell managing multi-tab sessions, low-RAM tab hibernation,
 /// navigation history, pointer/keyboard interaction, and frame rendering.
 pub struct Browser {
@@ -82,15 +109,27 @@ pub struct Browser {
     active_node: Option<NodeId>,
     pressed_target: Option<PressedTarget>,
     active_seq_counter: u64,
+    js_enabled: bool,
 }
 
 impl Browser {
     pub fn new(initial_url: &str, width: usize, height: usize) -> Self {
+        Self::with_options(initial_url, width, height, BrowserOptions::from_defaults())
+    }
+
+    /// Constructs a browser with explicit feature switches.
+    pub fn with_options(
+        initial_url: &str,
+        width: usize,
+        height: usize,
+        options: BrowserOptions,
+    ) -> Self {
         Self::with_history_store(
             initial_url,
             width,
             height,
             HistoryStore::from_env(),
+            options,
         )
     }
 
@@ -106,6 +145,7 @@ impl Browser {
             width,
             height,
             HistoryStore::open(data_dir),
+            BrowserOptions::from_defaults(),
         )
     }
 
@@ -114,6 +154,7 @@ impl Browser {
         width: usize,
         height: usize,
         store: HistoryStore,
+        options: BrowserOptions,
     ) -> Self {
         let initial_tab = TabState::create_tab("Droplet", 1);
 
@@ -138,6 +179,7 @@ impl Browser {
             active_node: None,
             pressed_target: None,
             active_seq_counter: 1,
+            js_enabled: options.js,
         };
 
         browser.load_input_into_tab(0, initial_url, false);
@@ -149,6 +191,10 @@ impl Browser {
             .get(self.active_tab)
             .map(|t| t.title.as_str())
             .unwrap_or("Droplet")
+    }
+
+    pub fn js_enabled(&self) -> bool {
+        self.js_enabled
     }
 
     pub fn present_backend(&self) -> &'static str {
@@ -461,7 +507,7 @@ impl Browser {
         let page = self
             .store
             .user_page(&url)
-            .unwrap_or_else(|| loader::load_url_document(&url));
+            .unwrap_or_else(|| loader::load_url_document(&url, self.js_enabled));
         self.tabs[tab_idx].current_url = page.final_url.clone();
         if tab_idx == self.active_tab {
             self.url_input = page.final_url.as_str().to_string();
@@ -1104,7 +1150,7 @@ impl Browser {
                 self.load_url_into_tab(idx, submission.url);
             }
             forms::FormMethod::Post => {
-                let page = loader::load_url_document_post(&submission.url, &submission.body);
+                let page = loader::load_url_document_post(&submission.url, &submission.body, self.js_enabled);
                 let final_url = page.final_url.clone();
                 self.tabs[idx].current_url = final_url.clone();
                 if idx == self.active_tab {
@@ -2847,6 +2893,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn js_browser(url: &str, width: usize, height: usize) -> Browser {
+        Browser::with_history_store(
+            url,
+            width,
+            height,
+            HistoryStore::open(temp_data_dir("js")),
+            BrowserOptions { js: true },
+        )
+    }
+
+    #[test]
+    fn javascript_is_disabled_by_default_and_scripts_are_not_run() {
+        let dir = std::env::temp_dir().join(format!("droplet_js_off_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let page = dir.join("off.html");
+        std::fs::write(
+            &page,
+            "<!DOCTYPE html><html><head><title>Тихо</title></head><body>\
+             <script>console.log('не должно выполниться');</script><p>Привет</p></body></html>",
+        )
+        .unwrap();
+        let url = format!("file://{}", page.display());
+        let browser = Browser::with_history_store(
+            &url,
+            800,
+            600,
+            HistoryStore::open(temp_data_dir("js-off")),
+            BrowserOptions::default(),
+        );
+        assert!(!browser.js_enabled());
+        assert!(browser.active_js_logs().is_empty());
+        assert!(browser.active_js_errors().is_empty());
+        assert_eq!(browser.active_title(), "Тихо");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn headless_inline_and_multi_script_execution_order_and_cyrillic() {
         let dir = std::env::temp_dir().join(format!("droplet_js_inline_{}", std::process::id()));
@@ -2865,7 +2947,7 @@ mod tests {
         .unwrap();
 
         let url = format!("file://{}", page.display());
-        let browser = Browser::new(&url, 800, 600);
+        let browser = js_browser(&url, 800, 600);
         assert!(browser.active_js_errors().is_empty());
         assert_eq!(
             browser.active_js_logs(),
@@ -2893,7 +2975,7 @@ mod tests {
         .unwrap();
 
         let url = format!("file://{}", page.display());
-        let browser = Browser::new(&url, 800, 600);
+        let browser = js_browser(&url, 800, 600);
         assert_eq!(
             browser.active_js_logs(),
             &["before".to_string(), "after 42".to_string()]
@@ -3176,7 +3258,7 @@ mod tests {
         });
 
         let url = format!("http://127.0.0.1:{port}/index.html");
-        let mut browser = Browser::new(&url, 600, 400);
+        let mut browser = js_browser(&url, 600, 400);
         let _ = server.join();
 
         assert_eq!(browser.active_js_logs(), &["lib loaded".to_string()]);
@@ -3200,7 +3282,7 @@ mod tests {
 
     #[test]
     fn host_hook_and_tab_hibernation_reset_js_runtime() {
-        let mut browser = Browser::new("about:droplet", 800, 600);
+        let mut browser = js_browser("about:droplet", 800, 600);
         assert!(browser.tabs[0].js.runtime.is_none());
         assert!(browser.status_text.is_empty());
 
@@ -3575,7 +3657,7 @@ mod tests {
         .unwrap();
 
         let url = format!("file://{}", page_path.display());
-        let mut browser = test_browser(&url, 800, 600);
+        let mut browser = js_browser(&url, 800, 600);
         assert_eq!(browser.active_title(), "Reactive Page");
         let doc = browser.tabs[0].doc.as_ref().unwrap();
         let status_id = doc.get_element_by_id("status").unwrap();
@@ -3691,7 +3773,7 @@ mod tests {
         )
         .unwrap();
         let url = format!("file://{}", page_path.display());
-        let browser = test_browser(&url, 640, 480);
+        let browser = js_browser(&url, 640, 480);
 
         // Tracker script blocked cleanly via TrackerFilter without crashing
         assert!(browser

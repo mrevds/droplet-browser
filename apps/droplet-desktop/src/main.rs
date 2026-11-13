@@ -1,15 +1,11 @@
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process;
-use std::sync::Arc;
 
 use droplet_dom::html;
-use droplet_dom::{Document, ElementData, NodeKind};
+use droplet_dom::Document;
+#[cfg(feature = "sandbox")]
 use droplet_desktop::{renderer_child, renderer_host};
-use droplet_image::DecodedImage;
 use droplet_shell::Browser;
-use droplet_style::css::{self, Stylesheet};
-use droplet_style::StyleContext;
 use droplet_url::Url;
 
 const DEFAULT_URL: &str = "about:droplet";
@@ -22,11 +18,15 @@ fn print_usage() {
          USAGE:\n\
          \tdroplet [URL]\n\
          \tdroplet --screenshot <out.ppm> [URL]\n\
-         \tdroplet --sandbox-screenshot <out.ppm> [URL]\n\
          \tdroplet --dump-dom [URL]\n\
          \tdroplet --dump-layout [URL]\n\
-         \tdroplet --renderer [--renderer-w <W> --renderer-h <H>]\n\
+         \tdroplet --bench [--runs N] [URL]\n\
          \tdroplet --help | -h\n\n\
+         GLOBAL OPTIONS:\n\
+         \t--js    enable the experimental ES-subset JavaScript VM (off by default)\n\n\
+         EXPERIMENTAL (build with --features sandbox):\n\
+         \tdroplet --sandbox-screenshot <out.ppm> [URL]\n\
+         \tdroplet --renderer [--renderer-w <W> --renderer-h <H>]\n\n\
          BUILT-IN PAGES:\n\
          \tabout:droplet, about:roadmap, about:architecture, about:test, about:blank"
     );
@@ -39,180 +39,61 @@ fn load_document(url_str: &str) -> Result<(Url, Document), String> {
     Ok((resp.url, html::parse(&resp.body)))
 }
 
-enum StyleChunk {
-    Inline(String),
-    External(usize),
+fn browser_for(url: &str) -> Browser {
+    Browser::new(url, HEADLESS_VIEWPORT_WIDTH, HEADLESS_VIEWPORT_HEIGHT)
 }
 
-fn is_data_uri(uri: &str) -> bool {
-    uri.as_bytes()
-        .get(..5)
-        .is_some_and(|head| head.eq_ignore_ascii_case(b"data:"))
-}
-
-fn stylesheet_link_href(data: &ElementData) -> Option<&str> {
-    if !data.tag_name.eq_ignore_ascii_case("link") {
-        return None;
+/// Peak resident set size of this process in KiB (Linux only).
+fn peak_rss_kib() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        line.split_whitespace().nth(1)?.parse().ok()
     }
-    let is_stylesheet = data.attr("rel").is_some_and(|rel| {
-        rel.split_ascii_whitespace()
-            .any(|token| token.eq_ignore_ascii_case("stylesheet"))
-    });
-    if !is_stylesheet {
-        return None;
-    }
-    let href = data.attr("href")?.trim();
-    if href.is_empty() {
+    #[cfg(not(target_os = "linux"))]
+    {
         None
-    } else {
-        Some(href)
     }
 }
 
-fn img_src(data: &ElementData) -> Option<&str> {
-    if !data.tag_name.eq_ignore_ascii_case("img") {
-        return None;
-    }
-    let src = data.attr("src")?.trim();
-    if src.is_empty() {
-        None
-    } else {
-        Some(src)
-    }
-}
-
-fn fetch_data_css(uri: &str, base_url: &Url) -> Option<String> {
-    let (_, bytes) = droplet_net::fetch_uri_bytes(uri, base_url).ok()?;
-    let css_text = String::from_utf8(bytes)
-        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-    if css_text.trim().is_empty() {
-        None
-    } else {
-        Some(css_text)
-    }
-}
-
-fn load_document_stylesheet(doc: &Document, base_url: &Url) -> Stylesheet {
-    let mut chunks = Vec::new();
-    let mut fetch_urls = Vec::new();
-    let mut url_indices: HashMap<String, usize> = HashMap::new();
-    let mut stack = vec![doc.root()];
-
-    while let Some(curr) = stack.pop() {
-        let Some(node) = doc.get(curr) else {
-            continue;
-        };
-        if let NodeKind::Element(data) = &node.kind {
-            if data.tag_name.eq_ignore_ascii_case("style") {
-                let css_text = doc.text_content(curr);
-                if !css_text.trim().is_empty() {
-                    chunks.push(StyleChunk::Inline(css_text));
-                }
-                continue;
+fn run_bench(args: &[String]) -> Result<String, String> {
+    let mut runs = 20usize;
+    let mut url = DEFAULT_URL;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--runs" => {
+                let value = args.get(i + 1).ok_or("--runs requires a number")?;
+                runs = value
+                    .parse()
+                    .map_err(|_| format!("invalid --runs value '{value}'"))?;
+                i += 2;
             }
-            if let Some(href) = stylesheet_link_href(data) {
-                if is_data_uri(href) {
-                    if let Some(css_text) = fetch_data_css(href, base_url) {
-                        chunks.push(StyleChunk::Inline(css_text));
-                    }
-                } else if let Ok(resolved) = base_url.resolve(href) {
-                    let idx = if let Some(&existing) = url_indices.get(resolved.as_str()) {
-                        existing
-                    } else {
-                        let idx = fetch_urls.len();
-                        url_indices.insert(resolved.as_str().to_string(), idx);
-                        fetch_urls.push(resolved);
-                        idx
-                    };
-                    chunks.push(StyleChunk::External(idx));
-                }
-            }
-        }
-        for &child in node.children.iter().rev() {
-            stack.push(child);
-        }
-    }
-
-    let fetched = droplet_net::fetch_many(&fetch_urls);
-    let parsed_external: Vec<Option<Stylesheet>> = fetched
-        .into_iter()
-        .map(|res| match res {
-            Ok(resp) if resp.status < 400 => Some(css::parse(&resp.body)),
-            _ => None,
-        })
-        .collect();
-
-    let mut rules = Vec::new();
-    for chunk in chunks {
-        match chunk {
-            StyleChunk::Inline(css_text) => {
-                rules.extend(css::parse(&css_text).rules);
-            }
-            StyleChunk::External(idx) => {
-                if let Some(Some(sheet)) = parsed_external.get(idx) {
-                    rules.extend(sheet.rules.iter().cloned());
-                }
+            other if other.starts_with('-') => return Err(format!("unknown bench option '{other}'")),
+            other => {
+                url = other;
+                i += 1;
             }
         }
     }
-
-    Stylesheet { rules }
-}
-
-fn fetch_decoded_image(src: &str, base_url: &Url) -> Option<DecodedImage> {
-    let (_, bytes) = droplet_net::fetch_uri_bytes(src, base_url).ok()?;
-    droplet_image::decode(&bytes).ok()
-}
-
-fn load_document_images(doc: &Document, base_url: &Url) -> HashMap<String, Arc<DecodedImage>> {
-    let mut images = HashMap::new();
-    let mut seen = HashSet::new();
-    let mut stack = vec![doc.root()];
-
-    while let Some(curr) = stack.pop() {
-        let Some(node) = doc.get(curr) else {
-            continue;
-        };
-        if let NodeKind::Element(data) = &node.kind {
-            if let Some(src) = img_src(data) {
-                if seen.insert(src.to_string()) {
-                    if let Some(decoded) = fetch_decoded_image(src, base_url) {
-                        images.insert(src.to_string(), Arc::new(decoded));
-                    }
-                }
-            }
-        }
-        for &child in node.children.iter().rev() {
-            stack.push(child);
-        }
-    }
-
-    images
-}
-
-fn dump_layout_for_url(url: &str) -> Result<String, String> {
-    let (base_url, doc) = load_document(url)?;
-    let sheet = load_document_stylesheet(&doc, &base_url);
-    let images = load_document_images(&doc, &base_url);
-    let vp_w = HEADLESS_VIEWPORT_WIDTH as f32;
-    let vp_h = HEADLESS_VIEWPORT_HEIGHT as f32;
-    let ctx = StyleContext {
-        viewport_width: vp_w,
-        viewport_height: vp_h,
-        hovered_node: None,
-        active_node: None,
-        focused_node: None,
-    };
-    if let Some(styled) = droplet_style::style_tree_with_context(&doc, &sheet, &ctx) {
-        let root = droplet_layout::layout_tree(&doc, &styled, vp_w, vp_h, &images);
-        Ok(droplet_layout::dump_layout(&root))
-    } else {
-        Ok("(empty layout tree)\n".to_string())
-    }
+    let parsed = Url::parse(url).map_err(|e| format!("Invalid URL '{url}': {e}"))?;
+    let report = droplet_shell::bench::bench_url(
+        &parsed,
+        runs,
+        HEADLESS_VIEWPORT_WIDTH,
+        HEADLESS_VIEWPORT_HEIGHT,
+    )?;
+    let rss = peak_rss_kib().map_or_else(|| "n/a".to_string(), |kib| kib.to_string());
+    Ok(format!("{} peak_rss_kib={rss}", report.to_line()))
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(pos) = args.iter().position(|a| a == "--js") {
+        args.remove(pos);
+        droplet_shell::set_js_default(true);
+    }
 
     if args.is_empty() {
         run_gui(DEFAULT_URL);
@@ -245,14 +126,15 @@ fn main() {
                 process::exit(2);
             }
             let url = args.get(1).map(String::as_str).unwrap_or(DEFAULT_URL);
-            match dump_layout_for_url(url) {
-                Ok(dumped) => print!("{dumped}"),
-                Err(err) => {
-                    eprintln!("Error: {err}");
-                    process::exit(1);
-                }
-            }
+            print!("{}", browser_for(url).active_layout_dump());
         }
+        "--bench" => match run_bench(&args[1..]) {
+            Ok(line) => println!("{line}"),
+            Err(err) => {
+                eprintln!("Error: {err}");
+                process::exit(1);
+            }
+        },
         "--screenshot" => {
             if args.len() < 2 || args.len() > 3 {
                 eprintln!("Error: --screenshot requires <out.ppm> and optional [URL]");
@@ -261,8 +143,7 @@ fn main() {
             }
             let out_path = Path::new(&args[1]);
             let url = args.get(2).map(String::as_str).unwrap_or(DEFAULT_URL);
-            let mut browser =
-                Browser::new(url, HEADLESS_VIEWPORT_WIDTH, HEADLESS_VIEWPORT_HEIGHT);
+            let mut browser = browser_for(url);
             let canvas = browser.render();
             if let Err(err) = canvas.write_ppm(out_path) {
                 eprintln!(
@@ -278,6 +159,7 @@ fn main() {
                 out_path.display()
             );
         }
+        #[cfg(feature = "sandbox")]
         "--sandbox-screenshot" => {
             if args.len() < 2 || args.len() > 3 {
                 eprintln!("Error: --sandbox-screenshot requires <out.ppm> and optional [URL]");
@@ -310,6 +192,7 @@ fn main() {
                 }
             }
         }
+        #[cfg(feature = "sandbox")]
         "--renderer" => {
             let (w, h) = match renderer_child::parse_renderer_dimensions(&args[1..]) {
                 Ok(dims) => dims,
@@ -339,6 +222,7 @@ fn main() {
     }
 }
 
+#[cfg(feature = "sandbox")]
 fn run_sandbox_screenshot(
     out_path: &Path,
     url: &str,

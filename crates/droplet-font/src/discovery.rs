@@ -268,6 +268,33 @@ fn load_bold_variant(
 
 static SYSTEM_FONTS: OnceLock<Arc<FontSet>> = OnceLock::new();
 
+/// `DROPLET_FONTS=builtin` skips system font discovery and uses only the 8x16 bitmap
+/// fallback, so layout goldens are identical on every machine (see `tests/corpus`).
+pub(crate) fn builtin_fonts_requested(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("builtin"))
+}
+
 pub(crate) fn system_font_set() -> Arc<FontSet> {
-    Arc::clone(SYSTEM_FONTS.get_or_init(|| Arc::new(FontSet::discover())))
+    Arc::clone(SYSTEM_FONTS.get_or_init(|| {
+        let env = std::env::var("DROPLET_FONTS").ok();
+        if builtin_fonts_requested(env.as_deref()) {
+            Arc::new(FontSet::empty())
+        } else {
+            Arc::new(FontSet::discover())
+        }
+    }))
+}
+
+#[cfg(test)]
+mod builtin_env_tests {
+    use super::builtin_fonts_requested;
+
+    #[test]
+    fn builtin_font_switch_parses_value() {
+        assert!(builtin_fonts_requested(Some("builtin")));
+        assert!(builtin_fonts_requested(Some(" BUILTIN ")));
+        assert!(!builtin_fonts_requested(Some("system")));
+        assert!(!builtin_fonts_requested(Some("встроенный")));
+        assert!(!builtin_fonts_requested(None));
+    }
 }

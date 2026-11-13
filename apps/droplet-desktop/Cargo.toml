@@ -19,5 +19,14 @@ droplet-layout = { path = "../../crates/droplet-layout" }
 droplet-paint = { path = "../../crates/droplet-paint" }
 droplet-platform = { path = "../../crates/droplet-platform" }
 droplet-shell = { path = "../../crates/droplet-shell" }
-droplet-ipc = { path = "../../crates/droplet-ipc" }
-droplet-sandbox = { path = "../../crates/droplet-sandbox" }
+droplet-ipc = { path = "../../crates/droplet-ipc", optional = true }
+droplet-sandbox = { path = "../../crates/droplet-sandbox", optional = true }
+
+[features]
+default = []
+# Experimental multi-process renderer: `--renderer`, `--sandbox-screenshot` (ROADMAP Phase 8).
+sandbox = ["dep:droplet-ipc", "dep:droplet-sandbox"]
+
+[[test]]
+name = "sandbox_renderer"
+required-features = ["sandbox"]

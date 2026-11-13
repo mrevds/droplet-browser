@@ -1,0 +1,17 @@
+Block (0.0, 0.0, 1024.0 x 244.0)
+  AnonymousBlock (0.0, 0.0, 1024.0 x 0.0)
+  Block (0.0, 0.0, 1024.0 x 244.0)
+    Block (16.0, 16.0, 992.0 x 212.0)
+      AnonymousBlock (16.0, 16.0, 992.0 x 0.0)
+      Block (17.0, 17.0, 300.0 x 150.0)
+        Block (17.0, 17.0, 300.0 x 20.0)
+          Text (17.0, 17.0, 56.0 x 20.0) "Сдвинут"
+        Block (17.0, 37.0, 50.0 x 50.0)
+      AnonymousBlock (16.0, 168.0, 992.0 x 0.0)
+      Block (16.0, 178.0, 992.0 x 20.0)
+        Text (16.0, 178.0, 120.0 x 20.0) "After container"
+      AnonymousBlock (16.0, 208.0, 992.0 x 0.0)
+      Block (16.0, 208.0, 992.0 x 20.0)
+        Text (16.0, 208.0, 96.0 x 20.0) "Fixed footer"
+      AnonymousBlock (16.0, 228.0, 992.0 x 0.0)
+  AnonymousBlock (0.0, 244.0, 1024.0 x 0.0)

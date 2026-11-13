@@ -1,0 +1,15 @@
+# Corpus review status: <page> <ok|wrong> <owning phase> <what is wrong>
+# Reviewed by a human from `droplet --screenshot` against the EXPECT comment at the top of each page.
+# A ticket may flip `wrong` -> `ok` only after looking at the screenshot, then re-blessing goldens.
+01-block-text   ok     -   -
+02-inline       wrong  P4  <em> is not italic (no italic face / synthetic oblique)
+03-flex         ok     -   -
+04-table        wrong  P3  no table layout: every cell is laid out inline on one line
+05-position     wrong  P3  position relative/absolute/fixed ignored (boxes stay in normal flow)
+06-float        wrong  P3  float ignored: text does not wrap around the floated box
+07-media        wrong  P2  @media rules dropped: narrow layout shown at 1024px
+08-cascade      wrong  P2  !important ignored (#a red); var() unsupported (#c has no height)
+09-box-sizing   wrong  P2  box-sizing: border-box ignored (.bb overflows its parent by 40px)
+10-lists-forms  ok     -   -
+11-overflow     wrong  P3  overflow: hidden does not clip; visibility: hidden still paints
+12-selectors    wrong  P2  :nth-child, :first-child, [attr], :not() do not match

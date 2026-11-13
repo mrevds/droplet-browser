@@ -29,22 +29,23 @@ pub struct LoadedPage {
 
 /// Fetches `url`, normalizes plain-text/empty-error responses into HTML, parses DOM and CSS,
 /// and concurrently loads bounded subresource stylesheets and images.
-pub fn load_url_document(url: &Url) -> LoadedPage {
+/// `<script>` elements are collected (and external ones fetched) only when `js` is true.
+pub fn load_url_document(url: &Url, js: bool) -> LoadedPage {
     match droplet_net::fetch(url) {
-        Ok(resp) => loaded_page_from_response(resp),
+        Ok(resp) => loaded_page_from_response(resp, js),
         Err(err) => load_error_page(url, &err),
     }
 }
 
 /// Fetches `url` with a form-encoded POST body and parses the response page.
-pub fn load_url_document_post(url: &Url, body: &str) -> LoadedPage {
+pub fn load_url_document_post(url: &Url, body: &str, js: bool) -> LoadedPage {
     match droplet_net::fetch_post(url, body, "application/x-www-form-urlencoded") {
-        Ok(resp) => loaded_page_from_response(resp),
+        Ok(resp) => loaded_page_from_response(resp, js),
         Err(err) => load_error_page(url, &err),
     }
 }
 
-fn loaded_page_from_response(resp: droplet_net::Response) -> LoadedPage {
+fn loaded_page_from_response(resp: droplet_net::Response, js: bool) -> LoadedPage {
     let final_url = resp.url.clone();
     let ct = resp.content_type.to_ascii_lowercase();
     let (html_source, fetch_subresources) =
@@ -73,6 +74,9 @@ fn loaded_page_from_response(resp: droplet_net::Response) -> LoadedPage {
         String::new(),
         fetch_subresources,
     );
+    if js && fetch_subresources {
+        page.scripts = collect_page_scripts(&page.doc, &page.final_url, true);
+    }
     page.load_ok = resp.status < 400;
     page
 }
@@ -114,15 +118,13 @@ pub fn build_loaded_page(
         HashMap::new()
     };
 
-    let scripts = collect_page_scripts(&doc, &final_url, fetch_subresources);
-
     LoadedPage {
         final_url,
         doc,
         stylesheet,
         uses_interaction,
         images,
-        scripts,
+        scripts: Vec::new(),
         title_override,
         status_override,
         load_ok: true,

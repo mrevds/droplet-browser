@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<!-- EXPECT: .rel is shifted 20px right/10px down from its normal spot; .abs sits at the top-right corner of .container (not in normal flow); .fix is pinned to the viewport bottom-left. -->
+<html><head><meta charset="utf-8"><title>Position</title>
+<style>
+.container { position: relative; width: 300px; height: 150px; border: 1px solid #000 }
+.rel { position: relative; left: 20px; top: 10px; background: #fc0 }
+.abs { position: absolute; top: 0; right: 0; width: 50px; height: 50px; background: #c33 }
+.fix { position: fixed; left: 0; bottom: 0; background: #3c3 }
+</style></head><body>
+<div class="container"><div class="rel">Сдвинут</div><div class="abs"></div></div>
+<p>After container</p>
+<div class="fix">Fixed footer</div>
+</body></html>

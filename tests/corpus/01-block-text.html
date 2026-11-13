@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<!-- EXPECT: h1/h2/p stacked vertically with UA margins; the long Cyrillic paragraph wraps inside the 400px box without overflowing it. -->
+<html><head><meta charset="utf-8"><title>Block text</title>
+<style>body { margin: 16px; font-size: 16px } .box { width: 400px; border: 1px solid #333; padding: 8px }</style>
+</head><body>
+<h1>Заголовок первого уровня</h1>
+<h2>Second level heading</h2>
+<p>Short paragraph.</p>
+<div class="box"><p>Длинный абзац на русском языке, который обязан переноситься по словам внутри блока шириной четыреста пикселей и не вылезать за его правую границу ни при каких условиях.</p></div>
+</body></html>

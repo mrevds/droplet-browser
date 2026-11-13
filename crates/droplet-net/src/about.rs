@@ -314,59 +314,51 @@ fn about_roadmap_html() -> String {
     <h1>Droplet Development Roadmap (Linux + Windows)</h1>
     <p><a href="about:droplet">&larr; Back to about:droplet</a></p>
 
-    <div class="flex-row">
-      <div class="flex-card">
-        <h3>Linux Target <span class="badge">Active</span></h3>
-        <p>Dynamic <code>libX11.so.6</code> windowing, <code>libssl.so.4</code>/<code>.3</code> TLS, system font discovery, and headless CLI.</p>
-      </div>
-      <div class="flex-card">
-        <h3>Windows Target <span class="badge">Portable</span></h3>
-        <p>Clean OS boundaries ready for Win32 GDI/D3D presentation and native Schannel TLS without <code>Cargo.toml</code> bloat.</p>
-      </div>
+    <div class="card">
+      <h2>Re-baseline (2026-11): depth before breadth</h2>
+      <p>&laquo;Done&raquo; now means: the corpus page looks right on a screenshot <b>and</b> <code>droplet --bench</code> did not regress. Corpus score at re-baseline: <b>4 / 12</b> pages correct.</p>
     </div>
 
     <div class="done">
-      <h2>Phase 1 (Done) &mdash; Core Pipeline</h2>
+      <h2>Phase 0 (Done) &mdash; Hygiene &amp; Measurement</h2>
       <ul>
-        <li>URL parser &amp; relative dot-segment resolver (<code>http://</code>, <code>file://</code>, <code>about:*</code>).</li>
-        <li>HTTP/1.1 client with 5s timeouts, <code>chunked</code> decoder, and redirect following.</li>
-        <li>Stack-based HTML5-style parser + cache-friendly Arena DOM (<code>Vec&lt;Node&gt;</code>).</li>
-        <li>CSS parser, selector specificity, inheritance, and Box Model + inline wrapping layout.</li>
-      </ul>
-    </div>
-
-    <div class="done">
-      <h2>Phase 2 (Done / DROP-002) &mdash; Inline-Block, Flexbox &amp; Pseudo-Classes</h2>
-      <ul>
-        <li><code>display: inline-block</code> and Flexbox (<code>flex-direction</code>, <code>justify-content</code>, <code>align-items</code>, <code>flex-wrap</code>, <code>gap</code>, <code>flex-grow</code>).</li>
-        <li>Relative units (<code>%</code>, <code>em</code>, <code>rem</code>, <code>vh</code>, <code>vw</code>) and dirty-flagged <code>:hover</code> / <code>:active</code> styling.</li>
-      </ul>
-    </div>
-
-    <div class="done">
-      <h2>Phase 3 (Done / DROP-003) &mdash; HTTPS, Keep-Alive Pool &amp; Tracker Filter</h2>
-      <ul>
-        <li>Dynamic OpenSSL TLS (<code>SSL_VERIFY_PEER</code> + SNI + hostname check), Keep-Alive connection pool, 60s DNS cache.</li>
-        <li>Concurrent 4-worker <code>fetch_many</code>, RFC 2397 <code>data:</code> URI decoder, and zero-alloc <code>TrackerFilter</code>.</li>
-      </ul>
-    </div>
-
-    <div class="done">
-      <h2>Phase 4 (Done / DROP-004) &mdash; TrueType Fonts, Images &amp; Workspace Crates</h2>
-      <ul>
-        <li>System TTF/OTF discovery, pure-Rust <code>sfnt</code>/<code>glyf</code> anti-aliased rasterizer, and bounded <code>GlyphAtlas</code> (4096 entries).</li>
-        <li>Pure-Rust image decoding (PNG, baseline JPEG, BMP, PPM, static SVG) and <code>&lt;img&gt;</code> replaced layout boxes.</li>
-        <li>Multi-tab <code>TabState</code> with Tab Hibernation (<code>MAX_WARM_TABS = 3</code>) and modular Cargo workspace crates (<code>droplet-url</code>, <code>droplet-net</code>, and sibling engine crates).</li>
+        <li>Dead legacy tree removed; JavaScript off by default (<code>--js</code>); sandbox behind cargo feature <code>sandbox</code>.</li>
+        <li><code>droplet --bench</code>: median per stage (html, css, style, layout, display list, raster) + peak RSS.</li>
+        <li><code>tests/corpus</code>: layout goldens with built-in font metrics and a human-reviewed <code>ok</code>/<code>wrong</code> manifest.</li>
       </ul>
     </div>
 
     <div class="card">
-      <h2>Phases 5&ndash;8 &mdash; Forms, Tabs, Scripting, GPU &amp; Sandbox</h2>
+      <h2>Phase 1 &mdash; Network that never freezes the window</h2>
       <ul>
-        <li><b>Phase 5</b>: Forms (<code>&lt;input&gt;</code>, <code>&lt;textarea&gt;</code>, <code>&lt;button&gt;</code>), focus ring, clipboard, text selection.</li>
-        <li><b>Phase 6</b>: Multi-tab shell, binary/SQLite history &amp; bookmarks, Box Model DevTools overlay.</li>
-        <li><b>Phase 7</b>: Minimalist ES subset bytecode VM &amp; incremental dirty DOM relayout.</li>
-        <li><b>Phase 8</b>: GPU rasterization (<code>wgpu</code>/Vulkan or MIT-SHM) &amp; process sandbox.</li>
+        <li>Background navigation thread, cancel, progressive paint; reliable TLS handshake; gzip/deflate; cookies.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Phase 2 &mdash; Correct CSS</h2>
+      <ul>
+        <li>Rule index (fast style on big pages), <code>!important</code>, <code>inherit</code>/<code>initial</code>/<code>unset</code>, <code>var()</code>, <code>@media</code>, <code>@import</code>.</li>
+        <li>Selectors <code>:not</code>, <code>:nth-*</code>, attributes, combinators; <code>box-sizing</code>, <code>min</code>/<code>max</code>, shorthands.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Phase 3 &mdash; Layout core</h2>
+      <ul>
+        <li><code>position</code> + <code>z-index</code>, floats, tables, <code>overflow</code> and scroll containers, margin collapsing, line breaking.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Phases 4&ndash;9</h2>
+      <ul>
+        <li><b>Phase 4</b>: italic &amp; font fallback, WebP, image memory budget and lazy decode.</li>
+        <li><b>Phase 5</b>: scrolling without relayout, incremental restyle/relayout, enforced perf budgets.</li>
+        <li><b>Phase 6</b>: daily-driver shell &mdash; forms, downloads, session restore.</li>
+        <li><b>Phase 7</b>: JavaScript decision record (no-JS by design, or a real ES2020+ engine).</li>
+        <li><b>Phase 8</b>: sandbox wired into the GUI, parser fuzzing, <code>unsafe</code> audit.</li>
+        <li><b>Phase 9</b>: Windows and Wayland parity; macOS with a macOS host.</li>
       </ul>
     </div>
   </div>
