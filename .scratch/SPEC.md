@@ -34,7 +34,7 @@ Status values: `done`, `ready`, `blocked`, `frozen` (do not touch until its phas
 | `DROP-120` | P2 | Selector rule index (buckets by id/class/tag, right-to-left match) | `done` | — | Wikipedia style `261 ms → < 20 ms` | [spec](issues/DROP-120-rule-index.md) |
 | `DROP-121` | P2 | Cascade: `!important`, `inherit`/`initial`/`unset`, custom properties + `var()` | `ready` | — | `08-cascade` | [spec](issues/DROP-121-cascade.md) |
 | `DROP-122` | P2 | `@media` (width/height/orientation/`prefers-color-scheme`/print), `@import`, `@supports` basic | `ready` | — | `07-media`, Wikipedia | [spec](issues/DROP-122-at-rules.md) |
-| `DROP-123` | P2 | Selectors: `:not`, `:nth-child/-of-type`, `:first/last-child`, attribute operators, `+` `~` | `ready` | — | `12-selectors` | [spec](issues/DROP-123-selectors.md) |
+| `DROP-123` | P2 | Selectors: `:not`, `:nth-child/-of-type`, `:first/last-child`, attribute operators, `+` `~` | `done` | — | `12-selectors` | [spec](issues/DROP-123-selectors.md) |
 | `DROP-124` | P2 | `box-sizing`, `min/max-width/height`, shorthand audit (margin/padding/border/background/font) | `done` | — | `09-box-sizing`, rust-lang.org | [spec](issues/DROP-124-box-model.md) |
 | `DROP-130` | P3 | Positioned layout: relative/absolute/fixed/sticky + `z-index` stacking | `ready` | — | `05-position` | draft |
 | `DROP-131` | P3 | Floats & `clear` | `ready` | — | `06-float` | draft |

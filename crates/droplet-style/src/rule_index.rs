@@ -5,12 +5,17 @@
 //! match an element whose id / class list / tag contains that key, so for each element only
 //! the rules in the element's own buckets need full matching. Results are identical to testing
 //! every rule; the cascade still sorts by (specificity, source order).
+//!
+//! DROP-123: a rightmost compound without id/class/tag is filed by its first attribute name
+//! (`[data-x]`), as a `:root` rule, or — for `:is()`/`:where()` — under the key of every
+//! argument (the subject must match one argument's rightmost compound). Only the rest
+//! (`*`, `:not(..)`, `:first-child`, ...) is tested against every element.
 
 use std::collections::HashMap;
 
 use droplet_dom::ElementData;
 
-use crate::css::{CompoundSelector, Stylesheet};
+use crate::css::{Combinator, CompoundSelector, PseudoClass, Stylesheet};
 
 const BLOOM_BITS: usize = 4096;
 const BLOOM_MASK: u32 = (BLOOM_BITS as u32) - 1;
@@ -106,8 +111,10 @@ impl AncestorBloom {
     }
 }
 
-/// Keys that must appear among an element's ancestors for a selector to match
-/// (taken from every compound left of the rightmost one).
+/// Keys that must appear among an element's ancestors for a selector to match: taken from
+/// every compound joined to its right neighbour by a descendant/child combinator. A compound
+/// left of `+`/`~` is a sibling, not an ancestor, and contributes nothing (but compounds left
+/// of an ancestral combinator further out are ancestors again: `.a > .b + p` needs `.a`).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AncestorHashes {
     hashes: [u32; MAX_ANCESTOR_HASHES],
@@ -115,7 +122,7 @@ pub(crate) struct AncestorHashes {
 }
 
 impl AncestorHashes {
-    fn from_prefix(prefix: &[(Option<crate::css::Combinator>, CompoundSelector)]) -> Self {
+    fn from_selector(parts: &[(Option<Combinator>, CompoundSelector)]) -> Self {
         let mut out = Self::default();
         let mut push = |h: u32| {
             if usize::from(out.len) < MAX_ANCESTOR_HASHES {
@@ -124,7 +131,11 @@ impl AncestorHashes {
             }
         };
         // Nearest compounds first: they are the most likely to reject.
-        for (_, compound) in prefix.iter().rev() {
+        for i in (1..parts.len()).rev() {
+            if !parts[i].0.is_some_and(Combinator::is_ancestral) {
+                continue;
+            }
+            let compound = &parts[i - 1].1;
             if let Some(id) = &compound.id {
                 push(key_hash(KIND_ID, id));
             }
@@ -146,9 +157,83 @@ pub(crate) struct RuleIndex {
     by_class: HashMap<String, Vec<u32>>,
     /// Keys are ASCII-lowercase (tag matching is case-insensitive).
     by_tag: HashMap<String, Vec<u32>>,
+    /// Keys are ASCII-lowercase attribute names (the DOM lowercases them too).
+    by_attr: HashMap<String, Vec<u32>>,
+    /// `attr_bit` of every `by_attr` key: most element attributes skip the hash lookup.
+    attr_mask: u64,
+    /// `:root` rules: candidates only for the document element.
+    root: Vec<u32>,
     universal: Vec<u32>,
     /// `[rule][selector]` ancestor keys, parallel to `Stylesheet::rules[..].selectors`.
     ancestor_hashes: Vec<Vec<AncestorHashes>>,
+}
+
+/// Where a rightmost compound can be filed. `None` = universal.
+enum Key<'a> {
+    Id(&'a str),
+    Class(&'a str),
+    Tag(&'a str),
+    Attr(&'a str),
+    Root,
+}
+
+/// Keys of which the subject element must have at least one; `false` = cannot narrow
+/// (universal). An empty `out` with `true` means the compound can never match.
+fn compound_keys<'a>(compound: &'a CompoundSelector, out: &mut Vec<Key<'a>>) -> bool {
+    if let Some(id) = &compound.id {
+        out.push(Key::Id(id));
+    } else if let Some(class) = compound.classes.first() {
+        out.push(Key::Class(class));
+    } else if let Some(attr) = compound.attrs.iter().find(|a| !is_common_attr(&a.name)) {
+        // `span[rel=x]`: few elements carry `rel`, far more are `span`.
+        out.push(Key::Attr(&attr.name));
+    } else if let Some(tag) = &compound.tag_name {
+        out.push(Key::Tag(tag));
+    } else if let Some(attr) = compound.attrs.first() {
+        out.push(Key::Attr(&attr.name));
+    } else if compound.pseudo.contains(&PseudoClass::Root) {
+        out.push(Key::Root);
+    } else {
+        // `:is(A, B)`: the subject matches A's or B's rightmost compound.
+        let alternatives = compound.pseudo.iter().find_map(|p| match p {
+            PseudoClass::Is(list) | PseudoClass::Where(list) => Some(list),
+            _ => None,
+        });
+        let Some(list) = alternatives else {
+            return false;
+        };
+        let start = out.len();
+        for arg in list {
+            if arg.parts.iter().any(|(_, c)| c.unsupported_pseudo) {
+                continue; // never matches: needs no bucket
+            }
+            let Some((_, last)) = arg.parts.last() else {
+                continue;
+            };
+            if !compound_keys(last, out) {
+                out.truncate(start);
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Attributes found on so many elements that a tag key is usually more selective.
+fn is_common_attr(name: &str) -> bool {
+    matches!(
+        name,
+        "id" | "class" | "style" | "href" | "src" | "title" | "type" | "name" | "role" | "lang"
+            | "dir" | "alt" | "width" | "height" | "value"
+    )
+}
+
+/// Cheap 6-bit fingerprint of an attribute name for `RuleIndex::attr_mask`.
+fn attr_bit(name: &str) -> u64 {
+    let b = name.as_bytes();
+    let (first, last) = (b.first().copied().unwrap_or(0), b.last().copied().unwrap_or(0));
+    let h = (b.len() as u32).wrapping_mul(7) ^ u32::from(first) ^ (u32::from(last) << 2);
+    1u64 << (h & 63)
 }
 
 fn push_unique(bucket: &mut Vec<u32>, idx: u32) {
@@ -164,6 +249,7 @@ impl RuleIndex {
             ancestor_hashes: Self::build_ancestor_hashes(sheet),
             ..Self::default()
         };
+        let mut keys = Vec::new();
         for (rule_idx, rule) in sheet.rules.iter().enumerate() {
             let idx = rule_idx as u32;
             for sel in &rule.selectors {
@@ -175,17 +261,23 @@ impl RuleIndex {
                 if sel.parts.iter().any(|(_, c)| c.unsupported_pseudo) {
                     continue;
                 }
-                if let Some(id) = &last.id {
-                    push_unique(index.by_id.entry(id.clone()).or_default(), idx);
-                } else if let Some(class) = last.classes.first() {
-                    push_unique(index.by_class.entry(class.clone()).or_default(), idx);
-                } else if let Some(tag) = &last.tag_name {
-                    push_unique(
-                        index.by_tag.entry(tag.to_ascii_lowercase()).or_default(),
-                        idx,
-                    );
-                } else {
+                keys.clear();
+                if !compound_keys(last, &mut keys) {
                     push_unique(&mut index.universal, idx);
+                    continue;
+                }
+                for key in &keys {
+                    let bucket = match *key {
+                        Key::Id(id) => index.by_id.entry(id.to_string()).or_default(),
+                        Key::Class(c) => index.by_class.entry(c.to_string()).or_default(),
+                        Key::Tag(t) => index.by_tag.entry(t.to_ascii_lowercase()).or_default(),
+                        Key::Attr(a) => {
+                            index.attr_mask |= attr_bit(a);
+                            index.by_attr.entry(a.to_ascii_lowercase()).or_default()
+                        }
+                        Key::Root => &mut index.root,
+                    };
+                    push_unique(bucket, idx);
                 }
             }
         }
@@ -199,10 +291,7 @@ impl RuleIndex {
             .map(|rule| {
                 rule.selectors
                     .iter()
-                    .map(|sel| {
-                        let prefix_len = sel.parts.len().saturating_sub(1);
-                        AncestorHashes::from_prefix(&sel.parts[..prefix_len])
-                    })
+                    .map(|sel| AncestorHashes::from_selector(&sel.parts))
                     .collect()
             })
             .collect()
@@ -218,7 +307,13 @@ impl RuleIndex {
     }
 
     /// Writes the candidate rule indices for `elem` into `out`, sorted ascending and deduplicated.
-    pub(crate) fn candidates(&self, elem: &ElementData, out: &mut Vec<u32>) {
+    /// `is_root`: `elem` is the document element (`:root`).
+    pub(crate) fn candidates(
+        &self,
+        elem: &ElementData,
+        is_root: impl FnOnce() -> bool,
+        out: &mut Vec<u32>,
+    ) {
         out.clear();
         if !self.by_id.is_empty() {
             if let Some(bucket) = elem.id().and_then(|id| self.by_id.get(id)) {
@@ -244,6 +339,19 @@ impl RuleIndex {
             if let Some(bucket) = bucket {
                 out.extend_from_slice(bucket);
             }
+        }
+        if self.attr_mask != 0 {
+            for (name, _) in &elem.attributes {
+                if self.attr_mask & attr_bit(name) == 0 {
+                    continue;
+                }
+                if let Some(bucket) = self.by_attr.get(name.as_str()) {
+                    out.extend_from_slice(bucket);
+                }
+            }
+        }
+        if !self.root.is_empty() && is_root() {
+            out.extend_from_slice(&self.root);
         }
         out.extend_from_slice(&self.universal);
         out.sort_unstable();
@@ -297,9 +405,9 @@ mod tests {
         );
         let index = RuleIndex::build(&sheet);
         let mut out = Vec::new();
-        index.candidates(&element("P", &[("class", "b a a"), ("id", "x")]), &mut out);
+        index.candidates(&element("P", &[("class", "b a a"), ("id", "x")]), || false, &mut out);
         assert_eq!(out, vec![0, 1, 2, 3, 4]);
-        index.candidates(&element("span", &[("class", "нет")]), &mut out);
+        index.candidates(&element("span", &[("class", "нет")]), || false, &mut out);
         assert_eq!(out, vec![4]);
     }
 
@@ -325,6 +433,63 @@ mod tests {
         bloom.pop_element(&outer);
         assert!(!bloom.may_match(&needs_menu_top_div));
         assert!(bloom.counters.iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn attribute_root_and_is_selectors_get_buckets() {
+        let sheet = css::parse(
+            "[data-тип] { color: red }\
+             [BGCOLOR=x i]:hover { color: red }\
+             :root { color: red }\
+             :is(.меню, #top, ul li, [href]) { color: red }\
+             :where(:not(.a)) { color: red }\
+             :is(p, :not(.a)) { color: red }\
+             :is(:visited, em) { color: red }\
+             *:first-child { color: red }\
+             span[rel~=x] { color: red }\
+             a[href] { color: red }",
+        );
+        let index = RuleIndex::build(&sheet);
+        assert_eq!(index.by_attr.get("data-тип"), Some(&vec![0]));
+        assert_eq!(index.by_attr.get("bgcolor"), Some(&vec![1]));
+        assert_eq!(index.root, vec![2]);
+        assert_eq!(index.by_class.get("меню"), Some(&vec![3]));
+        assert_eq!(index.by_id.get("top"), Some(&vec![3]));
+        assert_eq!(index.by_tag.get("li"), Some(&vec![3]));
+        assert_eq!(index.by_attr.get("href"), Some(&vec![3]));
+        // `:not()` cannot narrow: the whole `:is()` / `:where()` is universal.
+        assert_eq!(index.universal, vec![4, 5, 7]);
+        assert!(!index.by_tag.contains_key("p"));
+        // `:visited` never matches, so `:is(:visited, em)` only needs the `em` bucket.
+        assert_eq!(index.by_tag.get("em"), Some(&vec![6]));
+        // A rare attribute beats the tag; a common one does not.
+        assert_eq!(index.by_attr.get("rel"), Some(&vec![8]));
+        assert!(!index.by_tag.contains_key("span"));
+        assert_eq!(index.by_tag.get("a"), Some(&vec![9]));
+
+        let mut out = Vec::new();
+        index.candidates(&element("div", &[("data-тип", "1"), ("href", "/")]), || false, &mut out);
+        assert_eq!(out, vec![0, 3, 4, 5, 7]);
+        index.candidates(&element("html", &[]), || true, &mut out);
+        assert_eq!(out, vec![2, 4, 5, 7]);
+    }
+
+    #[test]
+    fn sibling_compounds_are_not_required_ancestors() {
+        let sheet = css::parse(
+            ".а + p { color: red } .x ~ .y > .b + p { color: blue } h1 ~ p span { color: green }",
+        );
+        let index = RuleIndex::build(&sheet);
+        // `.а` is a sibling of `p`: nothing is required among the ancestors.
+        assert_eq!(index.ancestor_hashes(0, 0).len, 0);
+        // `.y` is the parent of `.b`, a sibling of `p`, so `.y` is `p`'s parent; `.x` is
+        // only a sibling of `.y`.
+        let h = index.ancestor_hashes(1, 0);
+        assert_eq!(h.hashes[..usize::from(h.len)], [key_hash(KIND_CLASS, "y")]);
+        // `p` is an ancestor of `span`; `h1` is only `p`'s sibling.
+        let h = index.ancestor_hashes(2, 0);
+        assert_eq!(h.hashes[..usize::from(h.len)], [key_hash(KIND_TAG, "p")]);
+        assert_eq!(index.by_tag.get("p"), Some(&vec![0, 1]));
     }
 
     #[test]

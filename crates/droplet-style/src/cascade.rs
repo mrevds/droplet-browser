@@ -7,13 +7,14 @@ use crate::computed::{
     AlignItems, ComputedStyle, Display, FlexBasis, FlexDirection, FlexWrap, JustifyContent,
 };
 use crate::css::{
-    self, Color, Combinator, ComplexSelector, CompoundSelector, Declaration, Specificity,
-    Stylesheet, Unit, Value,
+    self, Color, Combinator, ComplexSelector, CompoundSelector, Declaration, PseudoClass,
+    Specificity, Stylesheet, Unit, Value,
 };
 use crate::rule_index::{AncestorBloom, RuleIndex};
 use crate::shorthand::{
     self, expand_four_sides, BorderState, ALL_SIDES, SIDE_BOTTOM, SIDE_LEFT, SIDE_RIGHT, SIDE_TOP,
 };
+use crate::sibling_index::{SiblingIndex, SiblingPos};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StyleContext {
@@ -214,10 +215,7 @@ pub fn stylesheet_uses_interaction(css: &Stylesheet) -> bool {
     css.rules.iter().any(|rule| {
         rule.selectors.iter().any(|sel| {
             !sel.parts.iter().any(|(_, c)| c.unsupported_pseudo)
-                && sel
-                    .parts
-                    .iter()
-                    .any(|(_, c)| c.hover || c.active || c.focus)
+                && sel.parts.iter().any(|(_, c)| c.uses_interaction())
         })
     })
 }
@@ -241,6 +239,7 @@ pub fn style_tree_with_context(
         author_index: RuleIndex::build(author_css),
         candidates: RefCell::new(Vec::new()),
         bloom: RefCell::new(AncestorBloom::new()),
+        siblings: RefCell::new(SiblingIndex::default()),
         style_ctx: ctx,
         hovered_ancestors: collect_ancestors(doc, ctx.hovered_node),
         active_ancestors: collect_ancestors(doc, ctx.active_node),
@@ -265,6 +264,8 @@ struct CascadeContext<'a> {
     /// Keys of the ancestors of the element currently being styled (maintained by
     /// `build_styled_node`'s depth-first walk).
     bloom: RefCell<AncestorBloom>,
+    /// Sibling positions for structural selectors, filled per parent on first use.
+    siblings: RefCell<SiblingIndex>,
     style_ctx: &'a StyleContext,
     hovered_ancestors: Vec<NodeId>,
     active_ancestors: Vec<NodeId>,
@@ -479,7 +480,15 @@ fn matching_rules<'a>(
     index: &RuleIndex,
 ) -> Vec<(Specificity, usize, &'a [Declaration])> {
     let mut candidates = cascade.candidates.borrow_mut();
-    index.candidates(elem, &mut candidates);
+    let is_root = || {
+        cascade
+            .doc
+            .get(node_id)
+            .and_then(|n| n.parent)
+            .and_then(|p| cascade.doc.get(p))
+            .is_some_and(|p| matches!(p.kind, NodeKind::Document))
+    };
+    index.candidates(elem, is_root, &mut candidates);
     let bloom = cascade.bloom.borrow();
     let mut matched = Vec::new();
     for &idx in candidates.iter() {
@@ -576,6 +585,19 @@ fn matches_parts_at(
             }
             false
         }
+        Some(Combinator::NextSibling) => cascade
+            .prev_element_sibling(node_id)
+            .is_some_and(|prev| matches_parts_at(cascade, prev, prefix)),
+        Some(Combinator::SubsequentSibling) => {
+            let mut prev = cascade.prev_element_sibling(node_id);
+            while let Some(prev_id) = prev {
+                if matches_parts_at(cascade, prev_id, prefix) {
+                    return true;
+                }
+                prev = cascade.prev_element_sibling(prev_id);
+            }
+            false
+        }
         None => false,
     }
 }
@@ -595,6 +617,9 @@ fn matches_compound(
         && sel.classes.is_empty()
         && !sel.hover
         && !sel.active
+        && !sel.focus
+        && sel.attrs.is_empty()
+        && sel.pseudo.is_empty()
     {
         return false;
     }
@@ -622,7 +647,96 @@ fn matches_compound(
     if sel.focus && cascade.style_ctx.focused_node != Some(node_id) {
         return false;
     }
-    true
+    for attr in &sel.attrs {
+        if !elem.attr(&attr.name).is_some_and(|v| attr.matches(v)) {
+            return false;
+        }
+    }
+    sel.pseudo
+        .iter()
+        .all(|p| matches_pseudo(cascade, node_id, p))
+}
+
+impl CascadeContext<'_> {
+    fn sibling_pos(&self, node_id: NodeId) -> SiblingPos {
+        self.siblings.borrow_mut().get(self.doc, node_id)
+    }
+
+    fn prev_element_sibling(&self, node_id: NodeId) -> Option<NodeId> {
+        self.siblings
+            .borrow_mut()
+            .prev_element_sibling(self.doc, node_id)
+    }
+}
+
+fn matches_any(cascade: &CascadeContext<'_>, node_id: NodeId, list: &[ComplexSelector]) -> bool {
+    list.iter().any(|sel| matches_complex(cascade, node_id, sel))
+}
+
+fn matches_pseudo(
+    cascade: &CascadeContext<'_>,
+    node_id: NodeId,
+    pseudo: &PseudoClass,
+) -> bool {
+    let doc = cascade.doc;
+    let parent = doc.get(node_id).and_then(|n| n.parent);
+    let pos = || cascade.sibling_pos(node_id);
+    match pseudo {
+        PseudoClass::Root => parent
+            .and_then(|p| doc.get(p))
+            .is_some_and(|p| matches!(p.kind, NodeKind::Document)),
+        PseudoClass::Empty => doc.get(node_id).is_some_and(|n| {
+            n.children.iter().all(|&c| {
+                matches!(doc.get(c).map(|c| &c.kind), Some(NodeKind::Text(t)) if t.is_empty())
+            })
+        }),
+        PseudoClass::NthChild { nth, last, of } if of.is_empty() => {
+            let p = pos();
+            if p.elem_index == 0 {
+                return false;
+            }
+            let index = if *last {
+                p.elem_count - p.elem_index + 1
+            } else {
+                p.elem_index
+            };
+            nth.matches(index as usize)
+        }
+        PseudoClass::NthChild { nth, last, of } => {
+            // `:nth-child(An+B of S)`: position among siblings matching S. Rare; O(siblings).
+            if !matches_any(cascade, node_id, of) {
+                return false;
+            }
+            let Some(siblings) = parent.and_then(|p| doc.get(p)).map(|p| &p.children) else {
+                return false;
+            };
+            let Some(me) = siblings.iter().position(|&s| s == node_id) else {
+                return false;
+            };
+            let range = if *last { &siblings[me + 1..] } else { &siblings[..me] };
+            let before = range
+                .iter()
+                .filter(|&&s| doc.element(s).is_some() && matches_any(cascade, s, of))
+                .count();
+            nth.matches(before + 1)
+        }
+        PseudoClass::NthOfType { nth, last } => {
+            let p = pos();
+            if p.type_index == 0 {
+                return false;
+            }
+            let index = if *last {
+                p.type_count - p.type_index + 1
+            } else {
+                p.type_index
+            };
+            nth.matches(index as usize)
+        }
+        PseudoClass::OnlyChild => pos().elem_count == 1,
+        PseudoClass::OnlyOfType => pos().type_count == 1,
+        PseudoClass::Not(list) => !matches_any(cascade, node_id, list),
+        PseudoClass::Is(list) | PseudoClass::Where(list) => matches_any(cascade, node_id, list),
+    }
 }
 
 fn resolve_font_size(
@@ -1351,8 +1465,11 @@ mod tests {
         assert_eq!(styled_link.style.color, Color::rgb(0x16, 0xa3, 0x4a));
 
         let styled_sibling = &styled_body.children[1];
-        // Sibling is not hovered/active and must NOT match :nth-child(2) or ::before
-        assert_eq!(styled_sibling.style.color, Color::rgb(0x25, 0x63, 0xeb));
+        // Sibling is not hovered/active; it is body's 2nd child, so `a:nth-child(2)` wins
+        // (DROP-123); `::before` must not apply.
+        assert_eq!(styled_sibling.style.color, Color::rgb(0x93, 0x33, 0xea));
+        // The first link is the 1st child of `.card`: not :nth-child(2).
+        assert_ne!(styled_link.style.color, Color::rgb(0x93, 0x33, 0xea));
     }
 
     #[test]
@@ -1582,8 +1699,29 @@ mod index_equivalence_tests {
             s.push('.');
             s.push_str(rng.pick(CLASSES));
         }
-        if rng.chance(10) {
-            s.push_str(rng.pick(&[":hover", ":active", ":focus", ":visited", ":first-child"]));
+        if rng.chance(25) {
+            s.push_str(rng.pick(&[
+                ":hover",
+                ":active",
+                ":focus",
+                ":visited",
+                ":first-child",
+                ":last-child",
+                ":nth-child(odd)",
+                ":nth-of-type(2n)",
+                ":only-child",
+                ":not(.a)",
+                ":is(.меню, #top)",
+                ":where(p, .b)",
+                "[class]",
+                "[class~=кнопка]",
+                "[id^=з]",
+                "[class*=-y i]",
+                ":root",
+                ":is(p > em, [id])",
+                ":where(:not(.a), .b)",
+                ":is(:visited, a)",
+            ]));
         }
         if s.is_empty() {
             s.push_str(rng.pick(TAGS));
@@ -1600,7 +1738,7 @@ mod index_equivalence_tests {
                 let parts = 1 + rng.next() % 3;
                 let mut sel = random_compound(rng);
                 for _ in 1..parts {
-                    let comb = if rng.chance(50) { " > " } else { " " };
+                    let comb = rng.pick(&[" > ", " ", " + ", " ~ "]);
                     sel = format!("{}{comb}{sel}", random_compound(rng));
                 }
                 list.push(sel);
@@ -1633,6 +1771,7 @@ mod index_equivalence_tests {
             author_index: RuleIndex::build(&sheet),
             candidates: RefCell::new(Vec::new()),
             bloom: RefCell::new(AncestorBloom::new()),
+            siblings: RefCell::new(SiblingIndex::default()),
             style_ctx: &ctx,
             hovered_ancestors: collect_ancestors(&doc, ctx.hovered_node),
             active_ancestors: collect_ancestors(&doc, ctx.active_node),
@@ -1666,6 +1805,94 @@ mod index_equivalence_tests {
             }
         }
         assert!(total_matches > 0, "seed {seed}: test generated no matches at all");
+    }
+
+    /// Which of the elements with an `id` match `selector`, in document order.
+    fn matching_ids(html_src: &str, selector: &str) -> Vec<String> {
+        let doc = html::parse(html_src);
+        let sheet = css::parse(&format!("{selector} {{ color: red }}"));
+        assert_eq!(sheet.rules.len(), 1, "{selector} did not parse");
+        assert_eq!(sheet.rules[0].selectors.len(), 1, "{selector} did not parse");
+        let ctx = StyleContext::default();
+        let cascade = CascadeContext {
+            doc: &doc,
+            ua_css: ua_stylesheet_ref(),
+            ua_index: ua_index_ref(),
+            author_css: &sheet,
+            author_index: RuleIndex::build(&sheet),
+            candidates: RefCell::new(Vec::new()),
+            bloom: RefCell::new(AncestorBloom::new()),
+            siblings: RefCell::new(SiblingIndex::default()),
+            style_ctx: &ctx,
+            hovered_ancestors: Vec::new(),
+            active_ancestors: Vec::new(),
+        };
+        (0..doc.nodes.len())
+            .filter(|&id| matches_complex(&cascade, id, &sheet.rules[0].selectors[0]))
+            .filter_map(|id| doc.element(id).and_then(|e| e.id()).map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn structural_attribute_logical_and_sibling_selectors_match() {
+        let page = r#"<html id="html"><body id="body">
+            <ul id="ul">
+              <li id="l1" class="пункт">один</li>
+              <li id="l2" data-x="1" lang="ru-RU">two</li>
+              <p id="p1" title="Привет мир"></p>
+              <li id="l3" class="пункт важный">три</li>
+              <li id="l4" class="skip" data-тип="Кнопка">skip</li>
+            </ul>
+            <div id="d1"><span id="s1">only</span></div>
+            <h2 id="h">t</h2><p id="p2">a</p><p id="p3">b</p>
+            </body></html>"#;
+        let ids = |sel| matching_ids(page, sel);
+        let table: &[(&str, &[&str])] = &[
+            ("li:nth-child(odd)", &["l1", "l4"]), // <p> is child 3
+            ("li:nth-child(even)", &["l2", "l3"]),
+            ("#ul > :nth-child(3)", &["p1"]),
+            ("li:nth-child(-n+2)", &["l1", "l2"]),
+            ("#ul > :nth-last-child(1)", &["l4"]),
+            ("li:nth-of-type(3)", &["l3"]),
+            ("li:nth-last-of-type(odd)", &["l2", "l4"]),
+            ("li:first-child", &["l1"]),
+            ("li:last-child", &["l4"]),
+            ("#ul p:first-of-type", &["p1"]),
+            ("#ul > :only-of-type", &["p1"]),
+            (":only-child", &["html", "body", "s1"]), // no <head> here
+            ("#ul > p:empty", &["p1"]),
+            (":root", &["html"]),
+            ("li:nth-child(2 of .пункт)", &["l3"]),
+            ("li:nth-last-child(1 of :not(.skip))", &["l3"]),
+            ("[data-x]", &["l2"]),
+            ("li[data-x='1']", &["l2"]),
+            ("[lang|=ru]", &["l2"]),
+            ("[class~=важный]", &["l3"]),
+            ("[class^=пун]", &["l1", "l3"]),
+            ("[class$=ный]", &["l3"]),
+            ("[title*='т м']", &["p1"]),
+            ("[data-тип=кнопка]", &[]),
+            ("[data-тип=Кнопка]", &["l4"]),
+            ("[data-x=1 i]", &["l2"]),
+            ("li:not(.skip)", &["l1", "l2", "l3"]),
+            ("li:not(.skip, [data-x])", &["l1", "l3"]),
+            ("li:not(:first-child):not(:last-child)", &["l2", "l3"]),
+            (":is(#l1, .skip)", &["l1", "l4"]),
+            (":where(ul, div) > :is(span, .важный)", &["l3", "s1"]),
+            (".пункт.важный", &["l3"]),
+            ("h2 + p", &["p2"]),
+            ("h2 ~ p", &["p2", "p3"]),
+            ("#l1 + li", &["l2"]),
+            ("#l2 + li", &[]),
+            ("#l2 ~ li", &["l3", "l4"]),
+            ("li + p ~ li", &["l3", "l4"]),
+            ("body > ul ~ div span", &["s1"]),
+            ("#ul > li:first-child + li + p", &["p1"]),
+            ("p:not(#ul p)", &["p2", "p3"]),
+        ];
+        for &(sel, expected) in table {
+            assert_eq!(ids(sel), expected, "{sel}");
+        }
     }
 
     #[test]

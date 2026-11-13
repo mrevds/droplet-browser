@@ -5,6 +5,7 @@ mod rule_index;
 mod shorthand;
 #[cfg(test)]
 mod shorthand_tests;
+mod sibling_index;
 
 pub use cascade::{
     style_tree, style_tree_with_context, stylesheet_uses_interaction, StyleContext, StyledNode,

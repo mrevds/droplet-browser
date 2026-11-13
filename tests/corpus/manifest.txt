@@ -12,4 +12,4 @@
 09-box-sizing   ok     -   -
 10-lists-forms  ok     -   -
 11-overflow     wrong  P3  overflow: hidden does not clip; visibility: hidden still paints
-12-selectors    wrong  P2  :nth-child, :first-child, [attr], :not() do not match
+12-selectors    ok     -   -
