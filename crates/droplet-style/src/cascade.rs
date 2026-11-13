@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use droplet_dom::{Document, ElementData, NodeId, NodeKind};
@@ -10,6 +11,7 @@ use crate::css::{
     self, Color, Combinator, ComplexSelector, CompoundSelector, Declaration, Specificity,
     Stylesheet, Unit, Value,
 };
+use crate::rule_index::{AncestorBloom, RuleIndex};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StyleContext {
@@ -197,6 +199,11 @@ fn ua_stylesheet_ref() -> &'static Stylesheet {
     UA_SHEET.get_or_init(|| css::parse(UA_CSS))
 }
 
+fn ua_index_ref() -> &'static RuleIndex {
+    static UA_INDEX: OnceLock<RuleIndex> = OnceLock::new();
+    UA_INDEX.get_or_init(|| RuleIndex::build(ua_stylesheet_ref()))
+}
+
 pub fn user_agent_stylesheet() -> Stylesheet {
     ua_stylesheet_ref().clone()
 }
@@ -227,7 +234,11 @@ pub fn style_tree_with_context(
     let cascade = CascadeContext {
         doc,
         ua_css: ua_stylesheet_ref(),
+        ua_index: ua_index_ref(),
         author_css,
+        author_index: RuleIndex::build(author_css),
+        candidates: RefCell::new(Vec::new()),
+        bloom: RefCell::new(AncestorBloom::new()),
         style_ctx: ctx,
         hovered_ancestors: collect_ancestors(doc, ctx.hovered_node),
         active_ancestors: collect_ancestors(doc, ctx.active_node),
@@ -243,7 +254,15 @@ pub fn style_tree_with_context(
 struct CascadeContext<'a> {
     doc: &'a Document,
     ua_css: &'a Stylesheet,
+    ua_index: &'a RuleIndex,
     author_css: &'a Stylesheet,
+    /// Built once per style pass (rules are public and may change between passes).
+    author_index: RuleIndex,
+    /// Scratch buffer reused for every element's candidate rule list.
+    candidates: RefCell<Vec<u32>>,
+    /// Keys of the ancestors of the element currently being styled (maintained by
+    /// `build_styled_node`'s depth-first walk).
+    bloom: RefCell<AncestorBloom>,
     style_ctx: &'a StyleContext,
     hovered_ancestors: Vec<NodeId>,
     active_ancestors: Vec<NodeId>,
@@ -332,6 +351,7 @@ fn build_styled_node(
             };
 
             let mut children = Vec::new();
+            cascade.bloom.borrow_mut().push_element(elem);
             for &child_id in &node.children {
                 if let Some(child) = build_styled_node(
                     cascade,
@@ -343,6 +363,7 @@ fn build_styled_node(
                     children.push(child);
                 }
             }
+            cascade.bloom.borrow_mut().pop_element(elem);
 
             Some(StyledNode {
                 node_id,
@@ -385,8 +406,14 @@ fn compute_element_style(
         ..ComputedStyle::default()
     };
 
-    let ua_matches = matching_rules(cascade, node_id, cascade.ua_css);
-    let author_matches = matching_rules(cascade, node_id, cascade.author_css);
+    let ua_matches = matching_rules(cascade, node_id, elem, cascade.ua_css, cascade.ua_index);
+    let author_matches = matching_rules(
+        cascade,
+        node_id,
+        elem,
+        cascade.author_css,
+        &cascade.author_index,
+    );
     let inline_decls = elem
         .attr("style")
         .map(css::parse_inline_style)
@@ -439,26 +466,65 @@ fn compute_element_style(
     style
 }
 
+/// Rules of `stylesheet` matching `node_id`, sorted by (specificity, source order).
+/// Only rules from the element's index buckets are tested (see `rule_index`).
 fn matching_rules<'a>(
+    cascade: &CascadeContext<'_>,
+    node_id: NodeId,
+    elem: &ElementData,
+    stylesheet: &'a Stylesheet,
+    index: &RuleIndex,
+) -> Vec<(Specificity, usize, &'a [Declaration])> {
+    let mut candidates = cascade.candidates.borrow_mut();
+    index.candidates(elem, &mut candidates);
+    let bloom = cascade.bloom.borrow();
+    let mut matched = Vec::new();
+    for &idx in candidates.iter() {
+        let idx = idx as usize;
+        if let Some(rule) = stylesheet.rules.get(idx) {
+            let bloom_reject =
+                |sel_idx: usize| !bloom.may_match(&index.ancestor_hashes(idx, sel_idx));
+            push_if_matches(cascade, node_id, idx, rule, bloom_reject, &mut matched);
+        }
+    }
+    matched.sort_by_key(|&(spec, idx, _)| (spec, idx));
+    matched
+}
+
+/// `skip(selector_index)` lets the caller reject a selector cheaply (ancestor Bloom filter).
+fn push_if_matches<'a>(
+    cascade: &CascadeContext<'_>,
+    node_id: NodeId,
+    idx: usize,
+    rule: &'a css::Rule,
+    skip: impl Fn(usize) -> bool,
+    matched: &mut Vec<(Specificity, usize, &'a [Declaration])>,
+) {
+    let mut best_spec: Option<Specificity> = None;
+    for (sel_idx, sel) in rule.selectors.iter().enumerate() {
+        if !skip(sel_idx) && matches_complex(cascade, node_id, sel) {
+            let spec = sel.specificity();
+            best_spec = Some(match best_spec {
+                Some(prev) if prev >= spec => prev,
+                _ => spec,
+            });
+        }
+    }
+    if let Some(spec) = best_spec {
+        matched.push((spec, idx, rule.declarations.as_slice()));
+    }
+}
+
+/// Reference implementation: tests every rule. Used to prove the index changes nothing.
+#[cfg(test)]
+fn matching_rules_all<'a>(
     cascade: &CascadeContext<'_>,
     node_id: NodeId,
     stylesheet: &'a Stylesheet,
 ) -> Vec<(Specificity, usize, &'a [Declaration])> {
     let mut matched = Vec::new();
     for (idx, rule) in stylesheet.rules.iter().enumerate() {
-        let mut best_spec: Option<Specificity> = None;
-        for sel in &rule.selectors {
-            if matches_complex(cascade, node_id, sel) {
-                let spec = sel.specificity();
-                best_spec = Some(match best_spec {
-                    Some(prev) if prev >= spec => prev,
-                    _ => spec,
-                });
-            }
-        }
-        if let Some(spec) = best_spec {
-            matched.push((spec, idx, rule.declarations.as_slice()));
-        }
+        push_if_matches(cascade, node_id, idx, rule, |_| false, &mut matched);
     }
     matched.sort_by_key(|&(spec, idx, _)| (spec, idx));
     matched
@@ -1673,5 +1739,203 @@ mod tests {
         let styled_button = &styled_body.children[3];
         assert_eq!(styled_button.style.display, Display::InlineBlock);
         assert_eq!(styled_button.style.border_radius, 6.0);
+    }
+}
+
+#[cfg(test)]
+mod index_equivalence_tests {
+    use super::*;
+    use droplet_dom::html;
+
+    /// Deterministic xorshift64 so failures are reproducible.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+            items[(self.next() % items.len() as u64) as usize]
+        }
+        fn chance(&mut self, percent: u64) -> bool {
+            self.next() % 100 < percent
+        }
+    }
+
+    const TAGS: &[&str] = &["div", "span", "p", "a", "ul", "li", "section", "em"];
+    const CLASSES: &[&str] = &["a", "b", "nav", "кнопка", "меню", "x-y", "item"];
+    const IDS: &[&str] = &["main", "top", "заголовок", "z"];
+
+    fn random_html(rng: &mut Rng, nodes: usize) -> String {
+        let mut out = String::from("<!DOCTYPE html><html><body>");
+        let mut open: Vec<&str> = Vec::new();
+        for _ in 0..nodes {
+            if !open.is_empty() && rng.chance(35) {
+                let tag = open.pop().unwrap();
+                out.push_str(&format!("</{tag}>"));
+                continue;
+            }
+            let tag = rng.pick(TAGS);
+            out.push('<');
+            out.push_str(tag);
+            if rng.chance(60) {
+                let mut classes = vec![rng.pick(CLASSES)];
+                if rng.chance(40) {
+                    classes.push(rng.pick(CLASSES));
+                }
+                out.push_str(&format!(" class=\"{}\"", classes.join(" ")));
+            }
+            if rng.chance(15) {
+                out.push_str(&format!(" id=\"{}\"", rng.pick(IDS)));
+            }
+            out.push('>');
+            out.push_str("текст");
+            open.push(tag);
+        }
+        while let Some(tag) = open.pop() {
+            out.push_str(&format!("</{tag}>"));
+        }
+        out.push_str("</body></html>");
+        out
+    }
+
+    fn random_compound(rng: &mut Rng) -> String {
+        let mut s = String::new();
+        match rng.next() % 5 {
+            0 => s.push('*'),
+            1 => s.push_str(&rng.pick(TAGS).to_ascii_uppercase()),
+            2 => s.push_str(rng.pick(TAGS)),
+            _ => {}
+        }
+        if rng.chance(20) {
+            s.push('#');
+            s.push_str(rng.pick(IDS));
+        }
+        let classes = rng.next() % 3;
+        for _ in 0..classes {
+            s.push('.');
+            s.push_str(rng.pick(CLASSES));
+        }
+        if rng.chance(10) {
+            s.push_str(rng.pick(&[":hover", ":active", ":focus", ":visited", ":first-child"]));
+        }
+        if s.is_empty() {
+            s.push_str(rng.pick(TAGS));
+        }
+        s
+    }
+
+    fn random_css(rng: &mut Rng, rules: usize) -> String {
+        let mut out = String::new();
+        for i in 0..rules {
+            let selectors = 1 + rng.next() % 2;
+            let mut list = Vec::new();
+            for _ in 0..selectors {
+                let parts = 1 + rng.next() % 3;
+                let mut sel = random_compound(rng);
+                for _ in 1..parts {
+                    let comb = if rng.chance(50) { " > " } else { " " };
+                    sel = format!("{}{comb}{sel}", random_compound(rng));
+                }
+                list.push(sel);
+            }
+            out.push_str(&format!("{} {{ margin-left: {i}px }}\n", list.join(", ")));
+        }
+        out
+    }
+
+    fn assert_index_matches_bruteforce(seed: u64) {
+        let mut rng = Rng(seed);
+        let doc = html::parse(&random_html(&mut rng, 120));
+        let sheet = css::parse(&random_css(&mut rng, 80));
+        assert!(!sheet.rules.is_empty(), "seed {seed}: generated CSS parsed to nothing");
+
+        let elements: Vec<NodeId> = (0..doc.nodes.len())
+            .filter(|&id| doc.element(id).is_some())
+            .collect();
+        let ctx = StyleContext {
+            hovered_node: elements.get(elements.len() / 2).copied(),
+            active_node: elements.get(elements.len() / 3).copied(),
+            focused_node: elements.last().copied(),
+            ..StyleContext::default()
+        };
+        let cascade = CascadeContext {
+            doc: &doc,
+            ua_css: ua_stylesheet_ref(),
+            ua_index: ua_index_ref(),
+            author_css: &sheet,
+            author_index: RuleIndex::build(&sheet),
+            candidates: RefCell::new(Vec::new()),
+            bloom: RefCell::new(AncestorBloom::new()),
+            style_ctx: &ctx,
+            hovered_ancestors: collect_ancestors(&doc, ctx.hovered_node),
+            active_ancestors: collect_ancestors(&doc, ctx.active_node),
+        };
+
+        let mut total_matches = 0;
+        for &id in &elements {
+            let elem = doc.element(id).unwrap();
+            // Recreate the Bloom state the depth-first walk would have for this node.
+            let ancestors: Vec<&ElementData> = collect_ancestors(&doc, doc.get(id).and_then(|n| n.parent))
+                .into_iter()
+                .filter_map(|a| doc.element(a))
+                .collect();
+            for a in &ancestors {
+                cascade.bloom.borrow_mut().push_element(a);
+            }
+            for (sheet, index) in [
+                (cascade.author_css, &cascade.author_index),
+                (cascade.ua_css, cascade.ua_index),
+            ] {
+                let fast = matching_rules(&cascade, id, elem, sheet, index);
+                let slow = matching_rules_all(&cascade, id, sheet);
+                let key = |v: &[(Specificity, usize, &[Declaration])]| {
+                    v.iter().map(|(s, i, _)| (*s, *i)).collect::<Vec<_>>()
+                };
+                assert_eq!(key(&fast), key(&slow), "seed {seed}, node {id} <{}>", elem.tag_name);
+                total_matches += fast.len();
+            }
+            for a in &ancestors {
+                cascade.bloom.borrow_mut().pop_element(a);
+            }
+        }
+        assert!(total_matches > 0, "seed {seed}: test generated no matches at all");
+    }
+
+    #[test]
+    fn rule_index_gives_identical_matches_to_testing_every_rule() {
+        for seed in 1..=40u64 {
+            assert_index_matches_bruteforce(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        }
+    }
+
+    #[test]
+    fn full_style_tree_unchanged_on_cyrillic_page() {
+        let doc = html::parse(
+            "<html><body><div id=\"заголовок\" class=\"меню a\"><p class=\"кнопка\">Привет</p>\
+             <span>мир</span></div></body></html>",
+        );
+        let sheet = css::parse(
+            "#заголовок { color: red } .меню p { margin-left: 5px } P.кнопка { padding-top: 3px }\
+             div > span { color: blue } * { margin-top: 1px }",
+        );
+        let styled = style_tree(&doc, &sheet).expect("styled tree");
+        let mut stack = vec![&styled];
+        let mut seen_p = false;
+        while let Some(node) = stack.pop() {
+            if let Some(elem) = doc.element(node.node_id) {
+                if elem.tag_name == "p" {
+                    seen_p = true;
+                    assert_eq!(node.style.margin.left, 5.0);
+                    assert_eq!(node.style.padding.top, 3.0);
+                    assert_eq!(node.style.margin.top, 1.0);
+                    assert_eq!(node.style.color, Color::rgb(255, 0, 0));
+                }
+            }
+            stack.extend(node.children.iter());
+        }
+        assert!(seen_p);
     }
 }

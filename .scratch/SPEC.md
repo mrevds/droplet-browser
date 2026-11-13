@@ -31,7 +31,7 @@ Status values: `done`, `ready`, `blocked`, `frozen` (do not touch until its phas
 | `DROP-111` | P1 | Reliable TLS handshake & timeouts (poll-based, separate connect/handshake/read deadlines) | `ready` | — | HN | [spec](issues/DROP-111-tls-timeouts.md) |
 | `DROP-112` | P1 | `Content-Encoding: gzip/deflate` (reuse PNG inflate) | `ready` | — | Wikipedia | [spec](issues/DROP-112-gzip.md) |
 | `DROP-113` | P1 | Cookies (RFC 6265 subset, bounded jar, `Secure`/`HttpOnly`/`Path`/`Expires`) | `ready` | — | login flows | [spec](issues/DROP-113-cookies.md) |
-| `DROP-120` | P2 | Selector rule index (buckets by id/class/tag, right-to-left match) | `ready` | — | Wikipedia style `261 ms → < 20 ms` | [spec](issues/DROP-120-rule-index.md) |
+| `DROP-120` | P2 | Selector rule index (buckets by id/class/tag, right-to-left match) | `done` | — | Wikipedia style `261 ms → < 20 ms` | [spec](issues/DROP-120-rule-index.md) |
 | `DROP-121` | P2 | Cascade: `!important`, `inherit`/`initial`/`unset`, custom properties + `var()` | `ready` | — | `08-cascade` | [spec](issues/DROP-121-cascade.md) |
 | `DROP-122` | P2 | `@media` (width/height/orientation/`prefers-color-scheme`/print), `@import`, `@supports` basic | `ready` | — | `07-media`, Wikipedia | [spec](issues/DROP-122-at-rules.md) |
 | `DROP-123` | P2 | Selectors: `:not`, `:nth-child/-of-type`, `:first/last-child`, attribute operators, `+` `~` | `ready` | — | `12-selectors` | [spec](issues/DROP-123-selectors.md) |

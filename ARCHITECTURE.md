@@ -113,6 +113,7 @@ The orchestration layer (`crates/droplet-shell/src/` -> `Browser`) manages multi
   - `Display`: `Block | Inline | InlineBlock | Flex | None`.
   - `ComputedStyle`: derives `Copy` with **zero `HashMap`s** or heap allocations—only typed scalar/enum/edge fields including Flexbox properties.
   - `StyleContext`: `{ viewport_width, viewport_height, hovered_node, active_node }` for `vh`/`vw` and `:hover`/`:active` matching; `stylesheet_uses_interaction` skips restyle/relayout on mouse motion for static pages.
+  - **Selector matching (`rule_index.rs`, DROP-120):** `RuleIndex` files each selector under its rightmost compound's id, else first class, else tag, else a universal list; per element only rules from its own buckets are matched (results identical to testing every rule). `AncestorBloom`, a 4 KiB counting Bloom filter of ancestor tag/id/class keys kept by the depth-first style walk, rejects descendant/child selectors whose required ancestor keys are absent. Built per style pass (UA index cached once); no per-node memory.
 
 ### 8. Box Layout Engine & Forms (`crates/droplet-layout/src/`)
 - `Rect` / `Dimensions` (`content`, `padding`, `border`, `margin`), `BoxType`, `LayoutBox`.
